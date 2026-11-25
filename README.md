@@ -1,6 +1,6 @@
 # Event Guardian
 
-Event Guardian is an event-operations product concept with a public landing page, an interactive frontend prototype, and an initial SQLite-backed Guardian API. The landing page is the default at `/`; the simulated workspace is a separate demo at `/demo`. The API implements persistent versioned facts, selective action invalidation, exact owner approvals, scoped action proposals, an audited execution-claim gate, and an owner kill switch through the TechMeet 2026 scenario.
+Event Guardian is an event-operations product concept with a public landing page, an interactive workspace, and an SQLite-backed Guardian API. The landing page is the default at `/`; the workspace is at `/demo`. Configure the local development proxy to use persistent API state, or leave it disabled to explore the browser-only prototype. The API implements versioned facts, selective action invalidation, exact owner decisions, scoped action proposals, an audited execution-claim gate, an owner kill switch, and evidence-backed readiness for the mandatory catering confirmation in the TechMeet 2026 scenario.
 
 ## Problem
 
@@ -88,7 +88,37 @@ The browser demo state resets when “Reset Demo” is used or the page is refre
 
 The console follows the dark-first neutral palette and evidence-led status vocabulary in the UI/UX brief. Status always includes an icon and label, budget advice is visually distinct from hard denials, approval rejection requires a reason, and the top-bar kill switch is confirmed before changing simulated dispatch state.
 
-## Guardian API foundation
+## Run the integrated local workspace
+
+The API-connected dashboard reads facts, actions, readiness, and audit history from SQLite. Owner venue changes, proposal approval/rejection, execution claims, and the pause switch are persisted by the backend. The Vite development server adds bearer credentials on the server side; those tokens are not embedded in browser JavaScript. Keep the development server bound to localhost.
+
+Create a local token file (it is git-ignored) and replace the example values with distinct random tokens of at least 32 characters:
+
+```sh
+cp .env.example .env.local
+python3 -c 'from pathlib import Path; import secrets; p=Path(".env.local"); names=("OWNER_TOKEN", "INVITATIONS_TOKEN", "CATERING_TOKEN", "VENDOR_TOKEN"); values={name: secrets.token_urlsafe(32) for name in names}; p.write_text("GUARDIAN_API_ENABLED=true\nGUARDIAN_API_TARGET=http://127.0.0.1:8000\n" + "".join(f"{name}={value}\n" for name, value in values.items()))'
+```
+
+In one terminal, load the same local-only credentials and start the API:
+
+```sh
+set -a
+. ./.env.local
+set +a
+python3 -m backend.api serve
+```
+
+In a second terminal, start Vite; it reads `.env.local` and proxies `/api` requests to the backend:
+
+```sh
+pnpm dev
+```
+
+Open `/demo`. The dashboard indicates whether the API is connected and reports failures instead of silently falling back to simulated state. “Refresh” reloads backend state; it does not erase it. To reset the persistent database, stop the API and run `python3 -m backend.api reset`.
+
+The vendor confirmation controls remain unavailable in the owner dashboard: the frontend does not impersonate the vendor service. Vendor evidence must arrive through the vendor-authenticated API route or a future inbox integration. An execution claim records authorization only; it does not send an email. The reviewer card is also marked unavailable in API mode because no reviewer service is implemented.
+
+## Guardian API
 
 The backend uses only Python's standard library. Run its unit tests and start the API from the repository root:
 
@@ -98,35 +128,38 @@ python3 -m unittest backend.test_guardian
 export OWNER_TOKEN="$(python3 -c 'import secrets; print(secrets.token_urlsafe(32))')"
 export INVITATIONS_TOKEN="$(python3 -c 'import secrets; print(secrets.token_urlsafe(32))')"
 export CATERING_TOKEN="$(python3 -c 'import secrets; print(secrets.token_urlsafe(32))')"
+export VENDOR_TOKEN="$(python3 -c 'import secrets; print(secrets.token_urlsafe(32))')"
 python3 -m backend.api serve
 ```
 
-The API listens on `http://127.0.0.1:8000` by default. Configure `DB_PATH`, `HOST`, or `PORT` to override the defaults. The initial SQLite database is created at `backend/data/guardian.sqlite3`; stop the API before running `python3 -m backend.api reset` to recreate that seeded database. Do not expose this prototype API to an untrusted network: bearer tokens are local development credentials and the server is intended for loopback use.
+The API requires four distinct bearer tokens, each at least 32 characters long. It listens on `http://127.0.0.1:8000` by default. Configure `DB_PATH`, `HOST`, or `PORT` to override the defaults. The initial SQLite database is created at `backend/data/guardian.sqlite3`; stop the API before running `python3 -m backend.api reset` to recreate that seeded database. Do not expose this prototype API or Vite credential proxy to an untrusted network: bearer tokens are local development credentials and both servers are intended for loopback use.
 
-All API routes require a bearer token. The owner token can read `GET /api/state` and `GET /api/audit?since=0`, confirm an existing fact with `POST /api/facts/{fact_id}` (`{"value": ...}`), approve an exact action revision with `POST /api/actions/{id}/approve` (`{"revision": 1}`), and control `POST /api/killswitch` (`{"enabled": true}`). Agent tokens can propose with `POST /api/actions` (`{"type": "send_invitation_batch", "params": {"recipients": ["guest@example.test"]}}`), revise through `POST /api/actions/{id}/revisions`, and request a guarded claim with `POST /api/actions/{id}/claim` (`{"revision": 1}`). Only `example.test` and `vendor.test` recipients are allowlisted in the fixture.
+All API routes require a bearer token. The owner token can read `GET /api/state`, `GET /api/readiness`, and `GET /api/audit?since=0`, confirm an existing fact with `POST /api/facts/{fact_id}` (`{"value": ...}`), approve or reject an exact action revision with `POST /api/actions/{id}/approve` (`{"revision": 1}`) or `POST /api/actions/{id}/reject` (`{"revision": 1, "reason": "..."}`), and control `POST /api/killswitch` (`{"enabled": true}`). Agent tokens can propose with `POST /api/actions` (`{"type": "send_invitation_batch", "params": {"recipients": ["guest@example.test"]}}`), revise through `POST /api/actions/{id}/revisions`, and request a guarded claim with `POST /api/actions/{id}/claim` (`{"revision": 1}`). Only `example.test` and `vendor.test` recipients are allowlisted in the fixture.
 
 The claim endpoint persists authorization before any future connector call. It does not invoke a connector, and claims are single-use; a duplicate is denied and must be reconciled rather than retried.
+
+The seeded mandatory catering obligation is bound to the current owner-confirmed `venue.address` version. A vendor service token can submit only `POST /api/evidence/replies` with exactly `{"token": "<correlation token>", "decision": "CONFIRM"}` or `{"token": "<correlation token>", "decision": "DECLINE"}`. Only a `CONFIRM` from the expected vendor using a current token is accepted. Declines, stale or unknown tokens, malformed replies, and unexpected fields are routed to an owner review task without storing the reply text. Changing the venue address reopens the obligation and issues a new correlation token; a previous venue's confirmation cannot make the current event ready. Readiness is calculated from accepted current-version vendor evidence and any required actions, not from provider acceptance alone.
 
 ## Verification
 
 pnpm build
 
 
-The build runs TypeScript checking and creates dist/. There are no configured frontend test or lint scripts. The browser demo needs no API key or external service. Its mock event, action, approval, evidence, and activity state is centralized in src/hooks/useDemoScenario.ts and src/data/demoData.ts. The API's core tests cover canonical parameter hashing, owner-only approvals/fact changes, selective invalidation, role restrictions, allowlisting, kill-switch behavior and duplicate claims.
+The build runs TypeScript checking and creates dist/. There are no configured frontend test or lint scripts. The browser-only demo needs no API key or external service. Its mock event, action, approval, evidence, and activity state is centralized in [src/hooks/useDemoScenario.ts](./src/hooks/useDemoScenario.ts) and [src/data/demoData.ts](./src/data/demoData.ts). The API tests cover canonical parameter hashing, owner-only decisions/fact changes, selective invalidation, role restrictions, allowlisting, kill-switch behavior, evidence matching and duplicate claims.
 
 ## Implemented frontend and simulated integrations
 
 Implemented in the browser are the dashboard, navigation, approval state, version and parameter guards, obligation and evidence matching, derived readiness, budget calculation, activity timeline, responsive presentation, and reset behavior.
 
-The invitation agent attempt, connector call, provider acceptance, provider readback, vendor replies, and evidence verification shown by the browser are simulations stored in local React state. The API has backend enforcement for fact/action version checks and approval-bound execution claims, but it is not yet connected to the UI and does not call an email connector. No real agent, MCP server, email delivery, vendor communication, or AI execution is implemented.
+In browser-only mode, invitation attempts, provider acceptance, vendor replies, and evidence are simulated in React state. In API mode, event facts, action decisions, claims, readiness, and history come from SQLite. No real agent, MCP server, email delivery, vendor inbox, reviewer model, or AI execution is implemented.
 
 ## Future integration roadmap
 
-The initial SQLite-backed API is the first step toward replacing local transitions. Next, wire the console to the API, then add mandatory obligations/evidence, connector integration, and scoped agent context. Preserve the separation between action attempts, provider acceptance, counterparty confirmation, and verified current-version evidence.
+Next, add scoped agent context, an independent reviewer, and secure connector/vendor-inbox integrations. Preserve the separation between action attempts, provider acceptance, counterparty confirmation, and verified current-version evidence.
 
 ## Known limits
 
 - One fixed TechMeet 2026 scenario is provided. Event facts and invitation parameters are not editable through the UI; the send guard still checks the approval snapshot and current dependencies.
 - Simulated provider acceptance is a transport readback, not proof of recipient delivery. Synthetic vendor confirmation verifies recorded demo evidence, not actual event execution.
 - Browser scenario state is in memory only and refreshes to the initial post-change scenario; API data persists in SQLite until reset.
-- The API does not yet implement obligations/readiness, vendor reply verification, agent context, model review, or actual connector dispatch.
+- The API currently seeds one mandatory catering obligation and has no general-purpose obligation editor, agent context, model review, or actual connector dispatch.

@@ -13,18 +13,20 @@ const pageTitles: Record<PageId, string> = {
 
 interface TopbarProps {
   page: PageId
+  eventName?: string
   ready: boolean
   openObligations: number
-  killSwitchOn: boolean
-  onKillSwitchChange: (enabled: boolean) => void
+  pauseAutomationOn: boolean
+  apiMode: boolean
+  onPauseAutomationChange: (enabled: boolean) => void
   onReset: () => void
   onMenu: () => void
 }
 
-export default function Topbar({ page, ready, openObligations, killSwitchOn, onKillSwitchChange, onReset, onMenu }: TopbarProps) {
+export default function Topbar({ page, eventName = 'New Workspace', ready, openObligations, pauseAutomationOn, apiMode, onPauseAutomationChange, onReset, onMenu }: TopbarProps) {
   const [confirmSwitch, setConfirmSwitch] = useState(false)
   const updateSwitch = () => {
-    onKillSwitchChange(!killSwitchOn)
+    onPauseAutomationChange(!pauseAutomationOn)
     setConfirmSwitch(false)
   }
   return <>
@@ -33,22 +35,22 @@ export default function Topbar({ page, ready, openObligations, killSwitchOn, onK
       <button className="menu-toggle" onClick={onMenu} aria-label="Open navigation"><Menu size={19} /></button>
       <div className="topbar-title">{pageTitles[page]}</div>
       <div className="topbar-separator" />
-      <span className="event-select"><span className="event-select-icon"><span /></span><span>TechMeet 2026</span></span>
-      <span className={`event-state ${ready ? 'state-ready' : ''}`} aria-live="polite"><span />{ready ? 'Recorded arrangements ready · V2' : `Not ready · ${openObligations} open`}</span>
+      <span className="event-select"><span className="event-select-icon"><span /></span><span>{eventName}</span></span>
+      <span className={`event-state ${ready ? 'state-ready' : ''}`} aria-live="polite"><span />{ready ? 'Recorded arrangements ready' : `Not ready · ${openObligations} open`}</span>
     </div>
     <div className="topbar-right">
-      <span className="connector-chip"><span className="connector-dot" /> Email · simulated</span>
-      <button className={`kill-switch-control ${killSwitchOn ? 'kill-switch-on' : ''}`} onClick={() => setConfirmSwitch(true)} aria-label={killSwitchOn ? 'Re-enable simulated dispatch' : 'Engage kill switch'} aria-pressed={killSwitchOn}>
-        <Power size={15} />{killSwitchOn ? 'Dispatch disabled' : 'Kill switch'}
+      <span className="connector-chip"><span className="connector-dot" /> {apiMode ? 'Email · disconnected' : 'Email · demo'}</span>
+      <button className={`pause-automation-control ${pauseAutomationOn ? 'pause-automation-on' : ''}`} onClick={() => setConfirmSwitch(true)} aria-label={pauseAutomationOn ? 'Re-enable auto-send' : 'Engage pause automation'} aria-pressed={pauseAutomationOn}>
+        <Power size={15} />{pauseAutomationOn ? 'Auto-send paused' : 'Pause automation'}
       </button>
-      <span className="demo-pill"><span className="demo-dot" /> DEMO</span>
-      <button className="reset-button" onClick={onReset} aria-label="Reset Demo"><RotateCcw size={14} /><span>Reset Demo</span></button>
-      <div className="top-avatar" title="Demo owner">RP</div>
+      
+      <button className="reset-button" onClick={onReset} aria-label={apiMode ? 'Refresh backend data' : 'Reset demo'}><RotateCcw size={14} /><span>{apiMode ? 'Refresh' : 'Reset'}</span></button>
+      <div className="top-avatar" title="Organizer">RP</div>
     </div>
     </header>
-    <Modal open={confirmSwitch} onClose={() => setConfirmSwitch(false)} eyebrow="DEMO CONTROL" title={killSwitchOn ? 'Re-enable simulated dispatch?' : 'Engage kill switch?'}>
-      <div className="switch-confirmation"><AlertTriangle size={20} /><p>{killSwitchOn ? 'This restores simulated action claims. No external connector is configured.' : 'This will block all simulated action claims in this browser demo. It cannot recall actions already recorded.'}</p></div>
-      <div className="modal-action-footer"><button className="button button-outline" onClick={() => setConfirmSwitch(false)}>Cancel</button><button className={`button ${killSwitchOn ? 'button-primary' : 'button-danger'}`} onClick={updateSwitch}>{killSwitchOn ? 'Re-enable demo dispatch' : 'Engage kill switch'}</button></div>
+    <Modal open={confirmSwitch} onClose={() => setConfirmSwitch(false)} eyebrow="AUTOMATION CONTROL" title={pauseAutomationOn ? 'Re-enable execution claims?' : 'Pause execution claims?'}>
+      <div className="switch-confirmation"><AlertTriangle size={20} /><p>{pauseAutomationOn ? 'This restores authorization claims through the Guardian API. There is still no configured external connector.' : `This will block new execution claims ${apiMode ? 'in the Guardian API' : 'in this browser demo'}. It cannot recall actions already recorded.`}</p></div>
+      <div className="modal-action-footer"><button className="button button-outline" onClick={() => setConfirmSwitch(false)}>Cancel</button><button className={`button ${pauseAutomationOn ? 'button-primary' : 'button-danger'}`} onClick={updateSwitch}>{pauseAutomationOn ? 'Re-enable auto-send' : 'Engage pause automation'}</button></div>
     </Modal>
   </>
 }

@@ -44,18 +44,25 @@ export default function App() {
     window.scrollTo({ top: 0, behavior: window.matchMedia('(prefers-reduced-motion: reduce)').matches ? 'auto' : 'smooth' })
   }
 
-  return <div className={`app-shell ${scenario.killSwitchOn ? 'kill-switch-active' : ''}`}>
-    <Sidebar page={page} onNavigate={navigate} open={sidebarOpen} onClose={() => setSidebarOpen(false)} />
+  return <div className={`app-shell ${scenario.pauseAutomationOn ? 'pause-automation-active' : ''}`}>
+    <Sidebar page={page} workspaceName={scenario.facts.name} onNavigate={navigate} open={sidebarOpen} onClose={() => setSidebarOpen(false)} />
     <div className="main-shell">
-      <Topbar page={page} ready={scenario.readinessReady} openObligations={scenario.openObligations} killSwitchOn={scenario.killSwitchOn} onKillSwitchChange={scenario.setKillSwitch} onReset={reset} onMenu={() => setSidebarOpen(true)} />
-      {scenario.killSwitchOn && <div className="kill-switch-banner" role="status"><strong>Kill switch engaged.</strong> Simulated dispatch is disabled until the owner re-enables it.</div>}
-      <main key={resetKey} className="console-dashboard">
-        <section id="section-goals" className="dashboard-section"><Overview scenario={scenario} onNavigate={navigate} /></section>
-        <section id="section-decisions" className="dashboard-section"><Decisions scenario={scenario} /></section>
-        <section id="section-actions" className="dashboard-section"><ActionsApprovals scenario={scenario} /></section>
-        <section id="section-readiness" className="dashboard-section"><ObligationsEvidence scenario={scenario} /></section>
-        <section id="section-history" className="dashboard-section"><ActivityLog scenario={scenario} /></section>
-      </main>
+      <Topbar page={page} eventName={scenario.facts.name} ready={scenario.readinessReady} openObligations={scenario.openObligations} pauseAutomationOn={scenario.pauseAutomationOn} apiMode={scenario.apiMode} onPauseAutomationChange={scenario.setPauseAutomation} onReset={reset} onMenu={() => setSidebarOpen(true)} />
+      {scenario.apiMode && <div className={`api-connection-banner ${scenario.apiError ? 'api-connection-error' : ''}`} role={scenario.apiError ? 'alert' : 'status'}>
+        <span className="api-connection-indicator" />
+        <span>{scenario.apiError ? `Guardian API unavailable: ${scenario.apiError}` : scenario.apiLoading ? 'Connecting to the persistent Guardian API…' : scenario.apiBusy ? 'Saving to the Guardian API…' : 'Connected to the persistent Guardian API. Changes are recorded in SQLite.'}</span>
+        {scenario.apiError && <button className="button button-quiet" onClick={() => void scenario.resetDemo()}>Retry</button>}
+      </div>}
+      {scenario.pauseAutomationOn && <div className="pause-automation-banner" role="status"><strong>Execution claims paused.</strong> The Guardian API will deny new claims until the organizer re-enables them.</div>}
+      {scenario.apiMode && !scenario.apiReady
+        ? <main className="api-loading-state" role="status">{scenario.apiLoading ? 'Loading persistent event state…' : 'The dashboard is unavailable until the Guardian API responds. Retry the connection above.'}</main>
+        : <main key={resetKey} className="console-dashboard">
+          <section id="section-goals" className="dashboard-section"><Overview scenario={scenario} onNavigate={navigate} /></section>
+          <section id="section-decisions" className="dashboard-section"><Decisions scenario={scenario} /></section>
+          <section id="section-actions" className="dashboard-section"><ActionsApprovals scenario={scenario} /></section>
+          <section id="section-readiness" className="dashboard-section"><ObligationsEvidence scenario={scenario} /></section>
+          <section id="section-history" className="dashboard-section"><ActivityLog scenario={scenario} /></section>
+        </main>}
     </div>
   </div>
 }

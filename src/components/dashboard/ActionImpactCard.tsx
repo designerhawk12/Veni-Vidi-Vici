@@ -14,7 +14,7 @@ export default function ActionImpactCard({ action, onOpen }: { action: AgentActi
   const style = styles[status]
   const Icon = style.icon
   const description = action.id === 'invitation-old'
-    ? 'Depends on the old venue version. A new owner approval is required.'
+    ? 'Depends on the old venue version. A new organizer approval is required.'
     : action.id === 'catering'
       ? action.status === 'confirmed' ? 'Current vendor confirmation is recorded for Venue B / V2.' : 'Vendor confirmation is tied to the previous venue. Awaiting updated confirmation.'
       : 'Does not depend on the venue. No intervention required.'

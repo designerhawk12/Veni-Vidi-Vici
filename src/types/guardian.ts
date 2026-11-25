@@ -1,5 +1,5 @@
 export type PageId = 'goals' | 'decisions' | 'actions' | 'readiness' | 'history'
-export type FactVersion = 1 | 2
+export type FactVersion = number
 export type ActionStatus =
   | 'stale'
   | 'awaiting_approval'
@@ -9,7 +9,8 @@ export type ActionStatus =
   | 'reconfirmation_required'
   | 'confirmed'
   | 'valid'
-export type ApprovalState = 'not_required' | 'awaiting_owner' | 'approved' | 'rejected' | 'invalidated'
+  | 'claimed'
+export type ApprovalState = 'not_required' | 'awaiting_organizer' | 'approved' | 'rejected' | 'invalidated'
 export type ObligationStatus = 'pending' | 'awaiting_confirmation' | 'provider_accepted' | 'confirmed' | 'verified'
 export type EvidenceKind = 'provider_readback' | 'counterparty_reply' | 'receipt' | 'late_reply'
 export type ActivityTone = 'neutral' | 'info' | 'warning' | 'blocked' | 'success'
@@ -30,6 +31,7 @@ export interface ActionDependency {
   fact: string
   version: FactVersion
   value: string
+  current?: boolean
 }
 
 export interface ActionParameters {
@@ -42,6 +44,8 @@ export interface ActionParameters {
 
 export interface AgentAction {
   id: string
+  backendActionId?: string
+  revision?: number
   name: string
   agent: string
   status: ActionStatus
