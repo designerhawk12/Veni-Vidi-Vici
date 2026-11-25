@@ -1,4 +1,4 @@
-export type PageId = 'overview' | 'actions' | 'obligations' | 'activity'
+export type PageId = 'goals' | 'decisions' | 'actions' | 'readiness' | 'history'
 export type FactVersion = 1 | 2
 export type ActionStatus =
   | 'stale'
@@ -13,6 +13,7 @@ export type ApprovalState = 'not_required' | 'awaiting_owner' | 'approved' | 're
 export type ObligationStatus = 'pending' | 'awaiting_confirmation' | 'provider_accepted' | 'confirmed' | 'verified'
 export type EvidenceKind = 'provider_readback' | 'counterparty_reply' | 'receipt' | 'late_reply'
 export type ActivityTone = 'neutral' | 'info' | 'warning' | 'blocked' | 'success'
+export type ReviewDisposition = 'accepted_recommendation' | 'accepted_tradeoff' | 'dismissed' | 'clarification_requested'
 
 export interface EventFacts {
   name: string

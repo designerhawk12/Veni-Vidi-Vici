@@ -1,10 +1,10 @@
 import { useReducer } from 'react'
 import { baseActivity, baseActions, baseEvidence, baseObligations, eventFacts } from '../data/demoData'
-import type { ActivityRecord, AgentAction, Approval, EventFacts, EvidenceRecord, Obligation } from '../types/guardian'
+import type { ActivityRecord, AgentAction, Approval, EventFacts, EvidenceRecord, Obligation, ReviewDisposition } from '../types/guardian'
 
 type Decision = 'pending' | 'approved' | 'rejected'
-interface State { facts: EventFacts; actions: AgentAction[]; approval: Approval | null; decision: Decision; evidence: EvidenceRecord[]; activities: ActivityRecord[] }
-type Event = { type: 'stale' | 'approve' | 'reject' | 'send' | 'reset' } | { type: 'reply'; version: 1 | 2; venue: string }
+interface State { facts: EventFacts; actions: AgentAction[]; approval: Approval | null; decision: Decision; evidence: EvidenceRecord[]; activities: ActivityRecord[]; killSwitchOn: boolean; rejectionReason: string }
+type Event = { type: 'stale' | 'approve' | 'send' | 'reset' } | { type: 'reject'; reason: string } | { type: 'reply'; version: 1 | 2; venue: string } | { type: 'kill-switch'; enabled: boolean } | { type: 'review-disposition'; disposition: ReviewDisposition; reason: string }
 const now = () => new Date().toISOString()
 const id = () => `${Date.now()}-${Math.random().toString(16).slice(2)}`
 const invitation = (state: State) => state.actions.find((action) => action.id === 'invitation-current')!
@@ -30,7 +30,7 @@ function matchingEvidence(obligation: Obligation, evidence: EvidenceRecord[]) {
 
 function initialState(): State { return {
   facts: { ...eventFacts }, actions: baseActions.map((action) => ({ ...action, dependencies: action.dependencies.map((dep) => ({ ...dep })), parameters: action.parameters && { ...action.parameters } })),
-  approval: null, decision: 'pending', evidence: baseEvidence.map((record) => ({ ...record })), activities: baseActivity.map((record) => ({ ...record })),
+  approval: null, decision: 'pending', evidence: baseEvidence.map((record) => ({ ...record })), activities: baseActivity.map((record) => ({ ...record })), killSwitchOn: false, rejectionReason: '',
 } }
 function log(state: State, title: string, detail: string, tone: ActivityRecord['tone'], code?: string): State {
   return { ...state, activities: [...state.activities, { id: id(), title, detail, tone, code, timestamp: now() }] }
@@ -38,6 +38,14 @@ function log(state: State, title: string, detail: string, tone: ActivityRecord['
 
 function reducer(state: State, event: Event): State {
   if (event.type === 'reset') return initialState()
+  if (event.type === 'kill-switch') {
+    const updated = { ...state, killSwitchOn: event.enabled }
+    return log(updated, event.enabled ? 'Kill switch engaged' : 'Kill switch released', 'Simulated dispatch state changed in the browser demo; no connector is configured.', event.enabled ? 'blocked' : 'info')
+  }
+  if (event.type === 'review-disposition') {
+    const detail = event.reason.trim() ? `${event.disposition.replaceAll('_', ' ')}. Reason: ${event.reason.trim()}` : event.disposition.replaceAll('_', ' ')
+    return log(state, 'Owner recorded review disposition', `${detail}. Review remains advisory and does not authorize an action.`, 'info')
+  }
   if (event.type === 'stale') {
     const old = state.actions.find((action) => action.id === 'invitation-old')!
     const attempt = log(state, 'Fresh agent attempted outdated invitation', `Synthetic agent attempted ${old.parameters?.venue} / V${old.version}.`, 'warning')
@@ -48,11 +56,15 @@ function reducer(state: State, event: Event): State {
     const action = invitation(state)
     if (state.decision === 'rejected' || validApproval(state) || !currentAction(action, state.facts) || !action.parameters) return state
     const approved = event.type === 'approve'
-    const next: State = { ...state, decision: approved ? 'approved' : 'rejected', approval: { actionId: action.id, state: approved ? 'approved' : 'rejected', boundVersion: state.facts.version, boundParameters: { ...action.parameters }, decidedAt: now() } }
-    return log(next, approved ? 'Owner approved corrected invitation' : 'Owner rejected corrected invitation', `${approved ? 'Approval' : 'Rejection'} applies to ${action.parameters.recipient}, ${action.parameters.venue}, ${action.parameters.date}, V${state.facts.version}.`, approved ? 'success' : 'warning')
+    const rejectionReason = event.type === 'reject' ? event.reason.trim() : ''
+    if (event.type === 'reject' && !rejectionReason) return state
+    const next: State = { ...state, decision: approved ? 'approved' : 'rejected', rejectionReason, approval: { actionId: action.id, state: approved ? 'approved' : 'rejected', boundVersion: state.facts.version, boundParameters: { ...action.parameters }, decidedAt: now() } }
+    const detail = `${approved ? 'Approval' : 'Rejection'} applies to ${action.parameters.recipient}, ${action.parameters.venue}, ${action.parameters.date}, V${state.facts.version}.${approved ? '' : ` Reason: ${rejectionReason}`}`
+    return log(next, approved ? 'Owner approved corrected invitation' : 'Owner rejected corrected invitation', detail, approved ? 'success' : 'warning')
   }
   if (event.type === 'send') {
     const action = invitation(state), approval = state.approval
+    if (state.killSwitchOn) return log(state, 'Guardian blocked guarded send', 'The owner kill switch is engaged. No simulated claim was recorded.', 'blocked', 'KILL_SWITCH_ON')
     if (state.evidence.some((record) => record.obligationId === 'guest-delivery' && record.kind === 'provider_readback' && record.accepted)) return state
     if (!approval || approval.state !== 'approved' || approval.actionId !== action.id || approval.boundVersion !== state.facts.version || !sameParameters(approval.boundParameters, action.parameters) || !currentAction(action, state.facts))
       return log(state, 'Guardian blocked guarded send', 'Approval, action parameters or current fact versions did not match. Simulated connector was not called.', 'blocked')
@@ -77,16 +89,16 @@ export function useDemoScenario() {
   const lateReplyAdded = state.evidence.some((record) => record.kind === 'late_reply')
   const decision: Decision = state.decision === 'approved' && !validApproval(state) ? 'pending' : state.decision
   const actions = state.actions.map((action): AgentAction => {
-    if (action.id === 'invitation-current') return { ...action, status: providerAccepted ? 'provider_accepted' : decision === 'approved' ? 'approved' : decision === 'rejected' ? 'rejected' : 'awaiting_approval', approvalState: decision === 'approved' ? 'approved' : decision === 'rejected' ? 'rejected' : 'awaiting_owner', reason: providerAccepted ? 'Guarded send passed; simulated provider acceptance and readback are recorded. Recipient delivery is not confirmed.' : decision === 'approved' ? 'Owner approved the exact current-version proposal; guarded simulation is available.' : decision === 'rejected' ? 'Owner rejected the corrected proposal; guarded simulation is unavailable.' : action.reason }
+    if (action.id === 'invitation-current') return { ...action, status: providerAccepted ? 'provider_accepted' : decision === 'approved' ? 'approved' : decision === 'rejected' ? 'rejected' : 'awaiting_approval', approvalState: decision === 'approved' ? 'approved' : decision === 'rejected' ? 'rejected' : 'awaiting_owner', reason: providerAccepted ? 'Guarded send passed; simulated provider acceptance and readback are recorded. Recipient delivery is not confirmed.' : decision === 'approved' ? 'Owner approved the exact current-version proposal; guarded simulation is available.' : decision === 'rejected' ? `Owner rejected the corrected proposal. Reason: ${state.rejectionReason}` : action.reason }
     if (action.id === 'catering' && vendorConfirmed) return { ...action, status: 'confirmed', version: state.facts.version, dependencies: [{ fact: 'venue', version: state.facts.version, value: state.facts.venue }], reason: 'Synthetic vendor confirmation matches Venue B / V2 and the current obligation is closed.' }
     return action
   })
   const obligations = baseObligations.map((obligation): Obligation => ({ ...obligation, status: obligation.id === 'guest-delivery' ? providerAccepted ? 'provider_accepted' : 'pending' : matchingEvidence(obligation, state.evidence) ? obligation.id === 'sponsor-receipt-obligation' ? 'verified' : 'confirmed' : obligation.id === 'catering-confirmation' ? 'awaiting_confirmation' : 'pending' }))
   const mandatory = obligations.filter((item) => item.mandatoryForReadiness)
   const openObligations = mandatory.filter((item) => !matchingEvidence(item, state.evidence)).length
-  return { facts: state.facts, actions, approval: state.approval && decision !== 'pending' ? state.approval : { actionId: invitation(state).id, state: 'awaiting_owner' as const, boundVersion: state.facts.version, boundParameters: { ...invitation(state).parameters! } }, obligations, evidence: state.evidence, activities: state.activities, decision, providerAccepted, vendorConfirmed, lateReplyAdded, readinessReady: mandatory.length > 0 && openObligations === 0, openObligations,
-    affectedActions: actions.filter((action) => action.status === 'stale' || action.status === 'reconfirmation_required' || action.id === 'catering' && action.status === 'confirmed').length,
+  return { facts: state.facts, actions, approval: state.approval && decision !== 'pending' ? state.approval : { actionId: invitation(state).id, state: 'awaiting_owner' as const, boundVersion: state.facts.version, boundParameters: { ...invitation(state).parameters! } }, obligations, evidence: state.evidence, activities: state.activities, decision, providerAccepted, vendorConfirmed, lateReplyAdded, readinessReady: mandatory.length > 0 && openObligations === 0, openObligations, killSwitchOn: state.killSwitchOn, rejectionReason: state.rejectionReason,
+    affectedActions: actions.filter((action) => action.status === 'stale' || action.status === 'reconfirmation_required').length,
     unaffectedActions: actions.filter((action) => action.status === 'valid').length,
-    simulateStaleAttempt: () => dispatch({ type: 'stale' }), approveInvitation: () => dispatch({ type: 'approve' }), rejectInvitation: () => dispatch({ type: 'reject' }), simulateGuardedSend: () => dispatch({ type: 'send' }),
-    simulateCurrentVendorReply: () => dispatch({ type: 'reply', version: state.facts.version, venue: state.facts.venue }), simulateLateVendorReply: () => dispatch({ type: 'reply', version: state.facts.previousVersion, venue: state.facts.previousVenue }), resetDemo: () => dispatch({ type: 'reset' }) }
+    simulateStaleAttempt: () => dispatch({ type: 'stale' }), approveInvitation: () => dispatch({ type: 'approve' }), rejectInvitation: (reason: string) => dispatch({ type: 'reject', reason }), simulateGuardedSend: () => dispatch({ type: 'send' }), setKillSwitch: (enabled: boolean) => dispatch({ type: 'kill-switch', enabled }),
+    simulateCurrentVendorReply: () => dispatch({ type: 'reply', version: state.facts.version, venue: state.facts.venue }), simulateLateVendorReply: () => dispatch({ type: 'reply', version: state.facts.previousVersion, venue: state.facts.previousVenue }), recordReviewDisposition: (disposition: ReviewDisposition, reason: string) => dispatch({ type: 'review-disposition', disposition, reason }), resetDemo: () => dispatch({ type: 'reset' }) }
 }

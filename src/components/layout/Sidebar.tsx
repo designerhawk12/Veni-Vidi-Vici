@@ -1,11 +1,12 @@
-import { Activity, ClipboardCheck, LayoutDashboard, ShieldCheck, WalletCards, X } from 'lucide-react'
+import { Activity, ArrowUpRight, ClipboardCheck, Compass, ShieldCheck, WalletCards, X } from 'lucide-react'
 import type { PageId } from '../../types/guardian'
 
-const items: { id: PageId; label: string; icon: typeof LayoutDashboard }[] = [
-  { id: 'overview', label: 'Overview', icon: LayoutDashboard },
-  { id: 'actions', label: 'Actions & Approvals', icon: ClipboardCheck },
-  { id: 'obligations', label: 'Obligations & Evidence', icon: WalletCards },
-  { id: 'activity', label: 'Activity Log', icon: Activity },
+const items: { id: PageId; label: string; icon: typeof Compass }[] = [
+  { id: 'goals', label: 'Goals & Facts', icon: Compass },
+  { id: 'decisions', label: 'Decisions', icon: ClipboardCheck },
+  { id: 'actions', label: 'Actions', icon: ShieldCheck },
+  { id: 'readiness', label: 'Readiness & Evidence', icon: WalletCards },
+  { id: 'history', label: 'History', icon: Activity },
 ]
 
 interface SidebarProps {
@@ -26,7 +27,7 @@ export default function Sidebar({ page, onNavigate, open, onClose }: SidebarProp
       </div>
       <div className="nav-caption">WORKSPACE</div>
       <nav className="side-nav" aria-label="Main navigation">
-        {items.map(({ id, label, icon: Icon }) => <button key={id} className={`nav-item ${page === id ? 'active' : ''}`} onClick={() => { onNavigate(id); onClose() }}>
+        {items.map(({ id, label, icon: Icon }) => <button key={id} className={`nav-item ${page === id ? 'active' : ''}`} aria-current={page === id ? 'page' : undefined} onClick={() => { onNavigate(id); onClose() }}>
           <Icon size={18} strokeWidth={1.9} /><span>{label}</span>{page === id && <span className="nav-current" />}
         </button>)}
       </nav>
@@ -37,6 +38,7 @@ export default function Sidebar({ page, onNavigate, open, onClose }: SidebarProp
         <span className="workspace-menu">···</span>
       </div>
       <div className="prototype-label"><span className="prototype-dot" /> Prototype environment</div>
+      <a className="sidebar-home-link" href="/">Product home <ArrowUpRight size={13} /></a>
       <div className="sidebar-foot">EVENT GUARDIAN <span>·</span> V0.9.4</div>
     </aside>
   </>
