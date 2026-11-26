@@ -1,0 +1,3 @@
+{$CADDY_DOMAIN} {
+	reverse_proxy guardian-api:8000
+}

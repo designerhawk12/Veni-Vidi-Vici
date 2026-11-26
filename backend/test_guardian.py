@@ -2,15 +2,20 @@ from __future__ import annotations
 
 import concurrent.futures
 import json
+import os
 import tempfile
 import threading
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 from urllib.error import HTTPError
 from urllib.request import Request, urlopen
 
-from backend.api import GuardianHandler, GuardianHTTPServer
+from backend.api import GuardianHandler, GuardianHTTPServer, initialize_local_env, load_local_env
 from backend.guardian import GuardianError, GuardianStore, canonical_params, params_digest
+from backend.mcp_server import call_tool, handle_request
+from backend.reviewer_benchmark import run_benchmark
+from backend.imap_connector import parse_vendor_message, poll_vendor_mailbox
 
 
 class GuardianStoreTests(unittest.TestCase):
@@ -20,6 +25,78 @@ class GuardianStoreTests(unittest.TestCase):
 
     def tearDown(self) -> None:
         self.temp_dir.cleanup()
+
+    def test_local_env_bootstrap_creates_private_distinct_tokens(self) -> None:
+        target = Path(self.temp_dir.name) / ".env.local"
+        created = initialize_local_env(target)
+        self.assertEqual(created, target)
+        self.assertEqual(target.stat().st_mode & 0o777, 0o600)
+        content = target.read_text(encoding="utf-8")
+        tokens = [
+            line.split("=", 1)[1]
+            for line in content.splitlines()
+            if line.split("=", 1)[0].endswith("_TOKEN")
+        ]
+        self.assertEqual(len(tokens), 4)
+        self.assertEqual(len(set(tokens)), 4)
+        with self.assertRaises(RuntimeError):
+            initialize_local_env(target)
+
+    def test_api_loads_private_local_env_without_overriding_process_env(self) -> None:
+        target = Path(self.temp_dir.name) / ".env.local"
+        target.write_text("GUARDIAN_ENV_TEST=from-file\n", encoding="utf-8")
+        target.chmod(0o600)
+        with patch.dict(os.environ, {"GUARDIAN_ENV_FILE": str(target), "GUARDIAN_ENV_TEST": "from-process"}):
+            load_local_env()
+            self.assertEqual(os.environ["GUARDIAN_ENV_TEST"], "from-process")
+
+    def test_role_agent_env_loader_only_imports_role_scoped_credentials(self) -> None:
+        target = Path(self.temp_dir.name) / ".env.local"
+        target.write_text(
+            "GEMINI_API_KEY=model-secret\nINVITATIONS_TOKEN=role-secret\n"
+            "OWNER_TOKEN=owner-secret\nSMTP_PASSWORD=mail-secret\n",
+            encoding="utf-8",
+        )
+        target.chmod(0o600)
+        with patch.dict(os.environ, {"GUARDIAN_ENV_FILE": str(target)}, clear=True):
+            load_local_env({"GEMINI_API_KEY", "INVITATIONS_TOKEN"})
+            self.assertEqual(os.environ["GEMINI_API_KEY"], "model-secret")
+            self.assertEqual(os.environ["INVITATIONS_TOKEN"], "role-secret")
+            self.assertNotIn("OWNER_TOKEN", os.environ)
+            self.assertNotIn("SMTP_PASSWORD", os.environ)
+
+    def test_reviewer_on_off_benchmark_keeps_hard_gate_enabled(self) -> None:
+        result = run_benchmark(2)
+        self.assertEqual(result["summary"]["review_on_warning_runs"], 2)
+        self.assertEqual(result["summary"]["review_off_warning_runs"], 0)
+        self.assertEqual(result["summary"]["hard_gate_denial_runs"], 2)
+        self.assertEqual(result["summary"]["hard_gate_codes"], ["BUDGET_CAP_EXCEEDED"])
+
+    def test_external_integrations_fail_explicitly_or_use_safe_offline_mode(self) -> None:
+        with patch.dict(os.environ, {"GEMINI_API_KEY": ""}):
+            from backend.live_agents import run_role_agent
+
+            with self.assertRaisesRegex(RuntimeError, "GEMINI_API_KEY"):
+                run_role_agent("invitations")
+        with patch.dict(os.environ, {"IMAP_HOST": ""}):
+            self.assertEqual(poll_vendor_mailbox(self.store), [])
+
+    def test_imap_parser_accepts_only_standalone_decision_from_plain_text_body(self) -> None:
+        raw = (
+            b"From: vendor@vendor.test\r\n"
+            b"Subject: Event Guardian confirmation msg-abc123\r\n"
+            b"Content-Type: text/plain; charset=utf-8\r\n\r\n"
+            b"CONFIRM\r\n"
+            b"> DECLINE\r\n"
+        )
+        self.assertEqual(parse_vendor_message(raw), ("msg-abc123", "CONFIRM"))
+
+        ambiguous = (
+            b"Subject: Event Guardian confirmation msg-abc123\r\n"
+            b"Content-Type: text/plain; charset=utf-8\r\n\r\n"
+            b"We can confirm this later.\r\n"
+        )
+        self.assertIsNone(parse_vendor_message(ambiguous))
 
     def invite(self, recipient: str = "guest@example.test") -> dict:
         return self.store.create_action(
@@ -68,6 +145,39 @@ class GuardianStoreTests(unittest.TestCase):
         self.assertEqual(duplicate["outcome"], "DENY")
         self.assertEqual(duplicate["code"], "DUPLICATE")
 
+    def test_expired_or_revoked_approval_is_denied(self) -> None:
+        invitation = self.invite()
+        self.store.approve_action(
+            "owner",
+            invitation["id"],
+            1,
+            expires_at="2099-01-01T00:00:00+00:00",
+        )
+        revoked = self.store.revoke_approval(
+            "owner",
+            invitation["id"],
+            1,
+            "Organizer changed the plan.",
+        )
+        self.assertEqual(revoked["status"], "revoked")
+        denied = self.store.claim_action("invitations-agent", invitation["id"], 1)
+        self.assertEqual(denied["code"], "NO_ACTIVE_APPROVAL")
+
+    def test_audit_chain_is_valid_and_detectable(self) -> None:
+        invitation = self.invite()
+        self.assertTrue(self.store.verify_audit()["valid"])
+        self.store.approve_action("owner", invitation["id"], 1)
+        self.assertTrue(self.store.verify_audit()["valid"])
+
+    def test_review_is_deduplicated_until_relevant_state_changes(self) -> None:
+        first = self.store.evaluate_review()
+        second = self.store.evaluate_review()
+        self.assertTrue(second["deduplicated"])
+        self.store.change_fact("owner", "venue.address", "Venue B")
+        refreshed = self.store.evaluate_review()
+        self.assertFalse(refreshed["deduplicated"])
+        self.assertEqual(refreshed["status"], "CURRENT")
+
     def test_owner_rejection_is_persisted_and_blocks_approval(self) -> None:
         invitation = self.invite()
         rejected = self.store.reject_action(
@@ -115,6 +225,19 @@ class GuardianStoreTests(unittest.TestCase):
         self.store.approve_action("owner", invitation["id"], 1)
         result = self.store.claim_action("invitations-agent", invitation["id"], 1)
         self.assertEqual(result["code"], "RECIPIENT_NOT_ALLOWLISTED")
+
+    def test_explicit_recipient_domain_configuration_is_enforced(self) -> None:
+        db_path = Path(self.temp_dir.name) / "custom-allowlist.sqlite3"
+        with patch.dict(os.environ, {"GUARDIAN_ALLOWED_RECIPIENT_DOMAINS": "test.example.org"}):
+            configured_store = GuardianStore(db_path)
+        action = configured_store.create_action(
+            "invitations-agent",
+            "send_invitation_batch",
+            {"recipient": "guest@test.example.org"},
+        )
+        configured_store.approve_action("owner", action["id"], 1)
+        result = configured_store.claim_action("invitations-agent", action["id"], 1)
+        self.assertEqual(result["status"], "claimed")
 
     def test_unknown_fact_cannot_be_confirmed_or_change_version(self) -> None:
         with self.assertRaises(GuardianError) as missing_error:
@@ -230,6 +353,57 @@ class GuardianStoreTests(unittest.TestCase):
         self.assertEqual(sum(result.get("status") == "claimed" for result in results), 1)
         self.assertEqual(sum(result.get("code") == "DUPLICATE" for result in results), 1)
 
+    def test_concurrent_budget_reservations_are_atomic(self) -> None:
+        self.store.change_fact("owner", "sponsor.amount", 100_000)
+
+        def reserve(amount: int) -> dict:
+            action = self.store.create_action(
+                "catering-agent",
+                "reserve_budget",
+                {"amount": amount, "category": "catering"},
+                required=False,
+            )
+            return self.store.claim_action("catering-agent", action["id"], 1)
+
+        with concurrent.futures.ThreadPoolExecutor(max_workers=2) as executor:
+            results = list(executor.map(reserve, (60_000, 60_000)))
+
+        successful = [result for result in results if result.get("status") == "claimed"]
+        denied = [result for result in results if result.get("outcome") == "DENY"]
+        self.assertEqual(len(successful), 1)
+        self.assertEqual(len(denied), 1)
+        self.assertEqual(denied[0]["code"], "BUDGET_CAP_EXCEEDED")
+
+    def test_mcp_read_and_reservation_tools_preserve_agent_role(self) -> None:
+        context = call_tool(self.store, "get_context", {"role": "invitations"})
+        self.assertNotIn("sponsor.amount", {fact["id"] for fact in context["facts"]})
+
+        status = call_tool(self.store, "claim_status", {"role": "invitations", "claim": "event ready"})
+        self.assertEqual(status["claim"], "not_ready")
+
+        reservation = call_tool(
+            self.store,
+            "reserve_budget",
+            {"role": "catering", "amount": 5000, "category": "catering"},
+        )
+        self.assertEqual(reservation["reservation_claim"]["status"], "claimed")
+
+        progress = call_tool(
+            self.store,
+            "record_progress",
+            {
+                "role": "invitations",
+                "task_id": "invitation-task",
+                "revision_id": 1,
+                "observation": "Correction drafted",
+            },
+        )
+        self.assertTrue(progress["recorded"])
+        self.assertEqual(progress["authority"], "agent_claim")
+
+        findings = call_tool(self.store, "list_findings", {"role": "catering"})
+        self.assertIn("findings", findings)
+
 
 class GuardianApiTests(unittest.TestCase):
     def setUp(self) -> None:
@@ -285,6 +459,52 @@ class GuardianApiTests(unittest.TestCase):
         status, response = self.request("GET", "/api/state", "owner")
         self.assertEqual(status, 200)
         self.assertEqual(response["workspace_id"], "techmeet-test")
+
+    def test_http_mcp_json_rpc_list_and_call(self) -> None:
+        status, listed = self.request(
+            "POST",
+            "/api/mcp",
+            "owner",
+            {"jsonrpc": "2.0", "id": 1, "method": "tools/list", "params": {}},
+        )
+        self.assertEqual(status, 200)
+        names = {tool["name"] for tool in listed["result"]["tools"]}
+        self.assertIn("get_context", names)
+        self.assertIn("execute_action", names)
+
+        status, denied = self.request(
+            "POST",
+            "/api/mcp",
+            "vendor",
+            {"jsonrpc": "2.0", "id": 2, "method": "tools/list", "params": {}},
+        )
+        self.assertEqual(status, 403)
+
+    def test_live_agent_endpoint_reports_missing_provider_key_cleanly(self) -> None:
+        with patch.dict(os.environ, {"GEMINI_API_KEY": ""}):
+            status, response = self.request(
+                "POST",
+                "/api/agents/run",
+                "owner",
+                {"role": "invitations"},
+            )
+        self.assertEqual(status, 503)
+        self.assertEqual(response["error"], "ROLE_AGENT_UNAVAILABLE")
+        self.assertIn("GEMINI_API_KEY", response["message"])
+
+    def test_http_mcp_context_and_priority_routes_are_owner_scoped(self) -> None:
+        status, context = self.request("GET", "/api/context?role=invitations", "owner")
+        self.assertEqual(status, 200)
+        self.assertNotIn("sponsor.amount", {fact["id"] for fact in context["facts"]})
+        self.assertIn("token_count", context)
+
+        status, priorities = self.request("GET", "/api/priorities?role=catering", "owner")
+        self.assertEqual(status, 200)
+        self.assertEqual(priorities["authority"], "advisory")
+        self.assertIn("recommendation", priorities)
+
+        status, denied = self.request("GET", "/api/context?role=invitations", "invitations")
+        self.assertEqual(status, 403)
 
     def test_http_action_approval_and_claim_flow_does_not_dispatch(self) -> None:
         status, action = self.request(

@@ -1,4 +1,4 @@
-import { useState } from 'react'
+import { useEffect, useState } from 'react'
 import { ChevronRight, Clock3, ShieldCheck } from 'lucide-react'
 import type { AgentAction } from '../types/guardian'
 import type { ReturnTypeUseDemoScenario } from './pageTypes'
@@ -9,11 +9,33 @@ import AutomationActivity from '../components/dashboard/AutomationActivity'
 export default function ActionsApprovals({ scenario }: { scenario: ReturnTypeUseDemoScenario }) {
   const [selectedId, setSelectedId] = useState<string | null>(null)
   const [proposeOpen, setProposeOpen] = useState(false)
-  const [actionType, setActionType] = useState<'send_invitation_batch' | 'send_catering_update' | 'reconcile_sponsor_receipt'>('send_catering_update')
+  const [actionType, setActionType] = useState<'send_invitation_batch' | 'send_catering_update' | 'reconcile_sponsor_receipt' | 'reserve_budget'>('send_catering_update')
   const [recipient, setRecipient] = useState('catering@vendor.test')
   const [note, setNote] = useState('')
+  const [amount, setAmount] = useState('5000')
   const [required, setRequired] = useState(false)
   const [rejectReason, setRejectReason] = useState('')
+  const [contexts, setContexts] = useState<Array<{ role: 'invitations' | 'catering'; facts: number; actions: number; open: number }>>([])
+  useEffect(() => {
+    if (!scenario.apiMode) {
+      setContexts([])
+      return
+    }
+    let active = true
+    void Promise.all([
+      scenario.context('invitations'),
+      scenario.context('catering'),
+    ]).then(([invitations, catering]) => {
+      if (!active) return
+      setContexts([
+        invitations ? { role: 'invitations', facts: invitations.facts.length, actions: invitations.actions.length, open: invitations.open_obligations.length } : { role: 'invitations', facts: 0, actions: 0, open: 0 },
+        catering ? { role: 'catering', facts: catering.facts.length, actions: catering.actions.length, open: catering.open_obligations.length } : { role: 'catering', facts: 0, actions: 0, open: 0 },
+      ])
+    }).catch(() => {
+      if (active) setContexts([])
+    })
+    return () => { active = false }
+  }, [scenario.apiMode])
   const selected = scenario.actions.find((action) => action.id === selectedId)
   const status = (action: AgentAction) => action.status
   const approvalLabel = (action: AgentAction) => action.id === 'invitation-old' ? 'Superseded · not approvable' : action.approvalState === 'awaiting_organizer' ? 'Organizer approval pending' : action.approvalState === 'approved' ? `Approved · bound to V${action.parameters?.factVersion ?? scenario.facts.version}` : action.approvalState === 'rejected' ? 'Rejected by organizer' : 'Not required'
@@ -23,7 +45,9 @@ export default function ActionsApprovals({ scenario }: { scenario: ReturnTypeUse
     event.preventDefault()
     const params: Record<string, unknown> = actionType === 'reconcile_sponsor_receipt'
       ? { receipt_id: note.trim() || `receipt-${Date.now()}`, note: note.trim() || 'Sponsor receipt check' }
-      : { recipients: [recipient.trim()], venue: scenario.facts.venue, event_date: scenario.facts.date, note: note.trim() || undefined }
+      : actionType === 'reserve_budget'
+        ? { amount: Math.max(1, Number(amount) || 1), category: note.trim() || 'event-reservation' }
+        : { recipients: [recipient.trim()], venue: scenario.facts.venue, event_date: scenario.facts.date, note: note.trim() || undefined }
     void scenario.createAction(actionType, params, required, roleForType(actionType)).then(() => {
       setProposeOpen(false)
       setNote('')
@@ -34,6 +58,15 @@ export default function ActionsApprovals({ scenario }: { scenario: ReturnTypeUse
     {scenario.apiMode
       ? <div className="callout-strip"><span className="callout-icon"><ShieldCheck size={16} /></span><div><strong>Persistent action state</strong><span>Action proposals, owner decisions, execution claims, and denials are loaded from the Guardian API audit trail.</span></div></div>
       : <AutomationActivity activities={scenario.activities} onSimulate={scenario.simulateStaleAttempt} />}
+    {scenario.apiMode && contexts.length > 0 && (
+      <div className="callout-strip">
+        <span className="callout-icon"><ShieldCheck size={16} /></span>
+        <div>
+          <strong>Role-scoped MCP context</strong>
+          <span>{contexts.map((context) => `${context.role}: ${context.facts} facts, ${context.actions} actions, ${context.open} open obligations`).join(' · ')}</span>
+        </div>
+      </div>
+    )}
     <div className="callout-strip"><span className="callout-icon"><ShieldCheck size={16} /></span><div><strong>Approval is proposal-bound</strong><span>Organizer approval applies only to the exact proposal and fact versions reviewed in Decisions. Stale actions cannot be approved.</span></div></div>
     <div className="action-list">{scenario.actions.map((action) => <button className={`action-row action-row-${action.status}`} key={action.id} onClick={() => open(action)}>
       <span className={`action-row-icon ${action.status === 'stale' ? 'row-icon-red' : action.status === 'reconfirmation_required' ? 'row-icon-amber' : action.status === 'valid' || action.status === 'confirmed' ? 'row-icon-green' : 'row-icon-blue'}`}><ShieldCheck size={17} /></span>
@@ -66,6 +99,9 @@ export default function ActionsApprovals({ scenario }: { scenario: ReturnTypeUse
             {scenario.apiMode && selected.backendActionId && selected.revision && selected.status === 'approved' && (
               <button className="button button-send" disabled={scenario.apiBusy || scenario.pauseAutomationOn} onClick={() => { void scenario.claimAction(selected.backendActionId!, selected.revision!, selected.agent.includes('Invitation') ? 'invitations' : 'catering'); setSelectedId(null) }}>Request claim</button>
             )}
+            {scenario.apiMode && selected.backendActionId && selected.revision && selected.status === 'approved' && (
+              <button className="button button-danger" disabled={scenario.apiBusy} onClick={() => { void scenario.revokeApproval(selected.backendActionId!, selected.revision!, 'Revoked by organizer from action detail'); setSelectedId(null) }}>Revoke approval</button>
+            )}
             <button className="button button-outline" onClick={() => setSelectedId(null)}>Close</button>
           </div>
         </div>
@@ -81,16 +117,22 @@ export default function ActionsApprovals({ scenario }: { scenario: ReturnTypeUse
           }}>
             <option value="send_invitation_batch">send_invitation_batch (Invitations agent)</option>
             <option value="send_catering_update">send_catering_update (Catering agent)</option>
+            <option value="reserve_budget">reserve_budget (Catering budget reservation)</option>
             <option value="reconcile_sponsor_receipt">reconcile_sponsor_receipt (Sponsor check)</option>
           </select>
         </label>
-        {actionType !== 'reconcile_sponsor_receipt' && (
+        {actionType === 'reserve_budget' && (
+          <label className="reason-field">Reservation amount (₹)
+            <input type="number" min={1} value={amount} onChange={(event) => setAmount(event.target.value)} required />
+          </label>
+        )}
+        {actionType !== 'reconcile_sponsor_receipt' && actionType !== 'reserve_budget' && (
           <label className="reason-field">Allowlisted recipient (@example.test or @vendor.test)
             <input value={recipient} onChange={(event) => setRecipient(event.target.value)} required />
           </label>
         )}
-        <label className="reason-field">{actionType === 'reconcile_sponsor_receipt' ? 'Receipt ID / reference' : 'Optional note'}
-          <input value={note} onChange={(event) => setNote(event.target.value)} placeholder={actionType === 'reconcile_sponsor_receipt' ? 'e.g. rcpt-2026-01' : 'Optional details'} />
+        <label className="reason-field">{actionType === 'reconcile_sponsor_receipt' ? 'Receipt ID / reference' : actionType === 'reserve_budget' ? 'Reservation category' : 'Optional note'}
+          <input value={note} onChange={(event) => setNote(event.target.value)} placeholder={actionType === 'reconcile_sponsor_receipt' ? 'e.g. rcpt-2026-01' : actionType === 'reserve_budget' ? 'e.g. catering' : 'Optional details'} />
         </label>
         <label style={{ display: 'flex', alignItems: 'center', gap: '8px', fontSize: '13px' }}>
           <input type="checkbox" checked={required} onChange={(event) => setRequired(event.target.checked)} />

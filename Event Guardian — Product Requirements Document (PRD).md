@@ -1,9 +1,9 @@
 # Event Guardian — Product Requirements Document (PRD)
 
 
-> **1 December 2026 delivery scope (PDF review, 25 November):** One reusable Goal Guardian engine, one synthetic TechMeet event, one owner, exactly two independent LLM-driven role agents (Invitations and Catering/Resources), Guardian MCP plus one email connector MCP, and one consolidated owner dashboard. The owner confirms venue facts; transport is not a separate role or required workflow. The minimum reviewer uses one read-only call and shared goal/policy, priority, resource-impact, progress/drift and trigger logic. All external actions use the deterministic gateway; evidence, exact approval, role isolation, deduplication, kill switch and persistent audit remain required. Required evaluation: focused positive/negative controls and reviewer-on/off comparison on identical fixtures. First stretch: grounded cross-agent conflict; optional deeper comparisons, broader qualitative policy, explicit expiry/revocation and hash-chained audit. Excluded for this release: calendar, temporary exceptions/restoration, waivers, incremental context deltas, separate context page, multi-event/production onboarding, exhaustive benchmarks, additional orchestration or custom models. Earlier design catalogue examples and scenario IDs are retained only as background or deferred where explicitly labelled. All implementation claims remain unverified.
+> **1 December 2026 delivery scope (PDF review, 25 November):** One reusable Goal Guardian engine, one synthetic TechMeet event, one owner, exactly two independent LLM-driven role agents (Invitations and Catering/Resources), Guardian MCP plus one email connector MCP, and one consolidated owner dashboard. The owner confirms venue facts; transport is not a separate role or required workflow. The minimum reviewer uses one read-only call and shared goal/policy, priority, resource-impact, progress/drift and trigger logic. All external actions use the deterministic gateway; evidence, exact approval, role isolation, deduplication, kill switch and persistent audit remain required. Required evaluation: focused positive/negative controls and reviewer-on/off comparison on identical fixtures. First stretch: grounded cross-agent conflict; optional deeper comparisons, broader qualitative policy, explicit expiry/revocation and hash-chained audit. Excluded for this release: calendar, temporary exceptions/restoration, waivers, incremental context deltas, separate context page, multi-event/production onboarding, exhaustive benchmarks, additional orchestration or custom models. Earlier design catalogue examples and scenario IDs are retained only as background or deferred where explicitly labelled. Implementation status and validation evidence are summarized in the matrix below; provider-backed rehearsal and user evaluation remain outstanding.
 
-**Product:** Event Guardian (user-facing) · **Engine:** Goal Guardian (reusable core) **Track:** Make MCP Matter (Track 1) · **Version:** 0.2 · 1 December scope · **Date:** 25 November 2026 **Source:** *Goal Guardian — Event Coordination, final integrated specification (rev 2, 24 Nov 2026, narrowed by the 25 Nov PDF review)* **Status:** Design proposal. Nothing here has been implemented, benchmarked or tested with users. Priorities (P0/P1/P2), effort and targets are planning judgments the team must confirm.
+**Product:** Event Guardian (user-facing) · **Engine:** Goal Guardian (reusable core) **Track:** Make MCP Matter (Track 1) · **Version:** 0.2 · 1 December scope · **Date:** 25 November 2026 **Source:** *Goal Guardian — Event Coordination, final integrated specification (rev 2, 24 Nov 2026, narrowed by the 25 Nov PDF review)* **Status:** Product requirements and implementation tracking. Automated coverage is local regression evidence, not proof of production readiness or user validation. Priorities (P0/P1/P2), effort and targets are planning judgments the team must confirm.
 
 Tags used: **\[Spec\]** carried over from the source specification · **\[Assumption\]** added in this document and needing confirmation · **\[Unverified\]** must be checked before relying on it.
 
@@ -315,14 +315,14 @@ Include one ordinary valid action that proceeds without warning. If the live rev
 
 | Feature family | Status (implemented / simulated / partial / not built) | Test evidence |
 | --- | --- | --- |
-| Event coordination (2 independent live LLM roles) |  |  |
-| Shared state and scoped context |  |  |
-| Disruption recovery |  |  |
-| Merged advisory common sense (required scope; CG-09 stretch) |  |  |
-| Execution gateway |  |  |
-| Verification (real inbox or disclosed simulator) |  |  |
-| Monitoring and console |  |  |
-| Evaluation |  |  |
+| Event coordination (2 independent live LLM roles) | **Partial**: fresh-process Gemini role-agent CLI exists, but live rehearsal and comparable ON/OFF benchmark remain to be run | MCP, HTTP and role-agent unit coverage |
+| Shared state and scoped context | **Implemented**: SQLite facts, role-scoped context, estimated payload accounting, SSE refresh, custom HTTP MCP and official-SDK streamable HTTP MCP | Backend state, scope, MCP and HTTP tests |
+| Disruption recovery | **Implemented**: selective venue invalidation, stale approvals, and fact-based evidence reopening | 25 Guardian unit/HTTP tests |
+| Merged advisory common sense (required scope; CG-09 stretch) | **Partial**: deterministic budget, drift, qualitative-policy, priority findings, stale-on-fact-change and deduped review records; no complete CG-12 model lifecycle | `/api/review`, reviewer dedupe and stale-state tests |
+| Execution gateway | **Implemented**: owner approval/revocation, role/type checks, stale facts, expiry, allowlist, kill switch, duplicate and atomic budget claims | Gateway, expiry, revocation and concurrent-claim tests |
+| Verification (real inbox or disclosed simulator) | **Partial**: optional SMTP dispatch, IMAP polling, local catcher fallback, and authenticated vendor reply API; sustained real-inbox rehearsal remains | HTTP vendor/evidence tests and connector configuration |
+| Monitoring and console | **Implemented**: responsive dashboard, SSE refresh, audit integrity, audit history, readiness, kill switch, reset and API status | TypeScript/Vite build |
+| Evaluation | **Partial**: focused backend suite, frontend build, Playwright smoke tests, and deterministic reviewer ON/OFF fixture comparison; no live-model ON/OFF or sustained benchmark | `pnpm test`, `pnpm test:e2e`, `pnpm build` and `pnpm benchmark:review` |
 
 ---
 

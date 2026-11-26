@@ -83,7 +83,7 @@ function reducer(state: State, event: Event): State {
   return state
 }
 
-export function useDemoScenario() {
+export function useDemoScenario({ forceDemo = false }: { forceDemo?: boolean } = {}) {
   const [state, dispatch] = useReducer(reducer, undefined, initialState)
   const backend = useGuardianBackend()
   const vendorConfirmed = matchingEvidence(baseObligations.find((item) => item.id === 'catering-confirmation')!, state.evidence)
@@ -103,7 +103,7 @@ export function useDemoScenario() {
     unaffectedActions: actions.filter((action) => action.status === 'valid').length,
     simulateStaleAttempt: () => dispatch({ type: 'stale' }), approveInvitation: () => dispatch({ type: 'approve' }), rejectInvitation: (reason: string) => dispatch({ type: 'reject', reason }), simulateGuardedSend: () => dispatch({ type: 'send' }), setPauseAutomation: (enabled: boolean) => dispatch({ type: 'pause-automation', enabled }),
     simulateCurrentVendorReply: () => dispatch({ type: 'reply', version: state.facts.version, venue: state.facts.venue }), simulateLateVendorReply: () => dispatch({ type: 'reply', version: state.facts.previousVersion, venue: state.facts.previousVenue }), recordReviewDisposition: (disposition: ReviewDisposition, reason: string) => dispatch({ type: 'review-disposition', disposition, reason }), resetDemo: () => dispatch({ type: 'reset' }) }
-  if (!backend.enabled) return {
+  if (!backend.enabled || forceDemo) return {
     ...localScenario,
     apiMode: false as const,
     apiReady: false,
@@ -141,6 +141,10 @@ export function useDemoScenario() {
     resolveFactProposal: async (_proposalId: string, _accept: boolean) => undefined,
     dispatchAction: async (_actionId: string, _revision: number, _simulateTimeout?: boolean) => undefined,
     reconcileOutbound: async (_messageId: string, _found: boolean) => undefined,
+    context: async (_role: 'invitations' | 'catering') => null,
+    priorities: async (_role: 'invitations' | 'catering') => null,
+    revokeApproval: async (_actionId: string, _revision: number, _reason?: string) => undefined,
+    verifyAudit: async () => ({ valid: true, verified_through: 0, entries: 0 }),
   }
 
   const backendFacts = backend.facts ?? state.facts
@@ -221,5 +225,9 @@ export function useDemoScenario() {
     resolveFactProposal: backend.resolveFactProposal,
     dispatchAction: backend.dispatchAction,
     reconcileOutbound: backend.reconcileOutbound,
+    context: backend.context,
+    priorities: backend.priorities,
+    revokeApproval: backend.revokeApproval,
+    verifyAudit: backend.verifyAudit,
   }
 }

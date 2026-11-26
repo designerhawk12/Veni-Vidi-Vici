@@ -2,6 +2,7 @@ import { useState } from 'react'
 import { AlertTriangle, ArrowDownRight, Eye, ShieldCheck } from 'lucide-react'
 import { reviewerFinding } from '../../data/demoData'
 import type { EventFacts, ReviewDisposition } from '../../types/guardian'
+import type { ApiReview } from '../../lib/guardianApi'
 
 const inr = (value: number) => `₹${new Intl.NumberFormat('en-IN').format(value)}`
 const reviewDispositions: ReviewDisposition[] = ['accepted_recommendation', 'accepted_tradeoff', 'dismissed', 'clarification_requested']
@@ -12,22 +13,24 @@ export default function ReviewerCard({
   facts,
   openObligations = 0,
   persistedDispositions = [],
+  reviewData,
 }: {
   onDisposition: (disposition: ReviewDisposition, reason: string) => void
   apiMode?: boolean
   facts?: EventFacts
   openObligations?: number
   persistedDispositions?: { id: string; disposition: ReviewDisposition; reason: string; created_at: string }[]
+  reviewData?: ApiReview | null
 }) {
   const [disposition, setDisposition] = useState<ReviewDisposition | ''>('')
   const [reason, setReason] = useState('')
   const [recorded, setRecorded] = useState(false)
-  const totalBudget = apiMode ? (facts?.budgetCap ?? 0) : reviewerFinding.totalBudget
-  const committed = apiMode ? Math.round(totalBudget * 0.4) : reviewerFinding.committed
-  const essentialForecast = apiMode ? (facts?.attendees ?? 0) * 500 : reviewerFinding.essentialForecast
-  const optionalUpgrade = apiMode ? Math.round(totalBudget * 0.1) : reviewerFinding.optionalUpgrade
-  const headroom = totalBudget - committed - essentialForecast
-  const shortfall = Math.max(0, optionalUpgrade - headroom)
+  const totalBudget = apiMode ? (reviewData?.budget.cap ?? facts?.budgetCap ?? 0) : reviewerFinding.totalBudget
+  const committed = apiMode ? (reviewData?.budget.committed ?? 0) : reviewerFinding.committed
+  const essentialForecast = apiMode ? (reviewData?.budget.essential_forecast ?? (facts?.attendees ?? 0) * 500) : reviewerFinding.essentialForecast
+  const optionalUpgrade = apiMode ? (reviewData?.budget.optional_proposal ?? 0) : reviewerFinding.optionalUpgrade
+  const headroom = apiMode ? (reviewData?.budget.headroom ?? totalBudget - committed - essentialForecast) : totalBudget - committed - essentialForecast
+  const shortfall = apiMode ? (reviewData?.budget.shortfall ?? Math.max(0, optionalUpgrade - headroom)) : Math.max(0, optionalUpgrade - headroom)
   const title = apiMode
     ? (shortfall > 0 ? 'Optional upgrade exceeds computed headroom' : 'Live SQLite budget & readiness check')
     : reviewerFinding.title

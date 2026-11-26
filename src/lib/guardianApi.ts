@@ -112,6 +112,8 @@ export interface ApiAuditItem {
   actor: string
   event: string
   payload: Record<string, unknown>
+  prev_hash?: string
+  entry_hash?: string
 }
 
 export class GuardianApiError extends Error {
@@ -158,7 +160,23 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
 export const guardianApi = {
   state: () => request<ApiState>('/api/state'),
   readiness: () => request<ApiReadiness>('/api/readiness'),
+  context: (role: 'invitations' | 'catering') =>
+    request<{
+      workspace_name?: string
+      kill_switch: boolean
+      facts: ApiFact[]
+      actions: ApiAction[]
+      open_obligations: ApiObligation[]
+      token_count: number
+    }>(`/api/context?role=${encodeURIComponent(role)}`),
+  priorities: (role: 'invitations' | 'catering') =>
+    request<{
+      recommendation: { priority: string; items: string[] }[]
+      findings: ApiReview['findings']
+      authority: 'advisory'
+    }>(`/api/priorities?role=${encodeURIComponent(role)}`),
   audit: () => request<{ items: ApiAuditItem[] }>('/api/audit?since=0'),
+  verifyAudit: () => request<{ valid: boolean; verified_through: number; entries?: number; broken_at?: number }>('/api/audit/verify'),
   review: () => request<ApiReview>('/api/review'),
   changeFact: (factId: string, value: unknown) => request(`/api/facts/${encodeURIComponent(factId)}`, { method: 'POST', body: JSON.stringify({ value }) }),
   changeVenue: (venue: string) => request('/api/facts/venue.address', { method: 'POST', body: JSON.stringify({ value: venue }) }),
@@ -203,6 +221,10 @@ export const guardianApi = {
     body: JSON.stringify({ revision }),
   }),
   reject: (actionId: string, revision: number, reason: string) => request(`/api/actions/${actionId}/reject`, {
+    method: 'POST',
+    body: JSON.stringify({ revision, reason }),
+  }),
+  revoke: (actionId: string, revision: number, reason = '') => request(`/api/actions/${actionId}/revoke`, {
     method: 'POST',
     body: JSON.stringify({ revision, reason }),
   }),

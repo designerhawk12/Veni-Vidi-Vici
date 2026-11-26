@@ -1,0 +1,111 @@
+services:
+  guardian-api:
+    build: .
+    environment:
+      HOST: 0.0.0.0
+      PORT: 8000
+      DB_PATH: /data/guardian.sqlite3
+      GUARDIAN_ALLOW_PUBLIC_NETWORK: "true"
+      GUARDIAN_PRODUCTION_TLS: "true"
+      GUARDIAN_ALLOWED_RECIPIENT_DOMAINS: ${GUARDIAN_ALLOWED_RECIPIENT_DOMAINS:-example.test,vendor.test}
+      OWNER_TOKEN: ${OWNER_TOKEN:?set OWNER_TOKEN}
+      INVITATIONS_TOKEN: ${INVITATIONS_TOKEN:?set INVITATIONS_TOKEN}
+      CATERING_TOKEN: ${CATERING_TOKEN:?set CATERING_TOKEN}
+      VENDOR_TOKEN: ${VENDOR_TOKEN:?set VENDOR_TOKEN}
+      INVITATIONS_MCP_URL: http://guardian-mcp-invitations:8010/mcp
+      CATERING_MCP_URL: http://guardian-mcp-catering:8011/mcp
+      SMTP_HOST: ${SMTP_HOST:-}
+      SMTP_PORT: ${SMTP_PORT:-587}
+      SMTP_FROM: ${SMTP_FROM:-guardian@example.test}
+      SMTP_USER: ${SMTP_USER:-}
+      SMTP_PASSWORD: ${SMTP_PASSWORD:-}
+      SMTP_USE_TLS: ${SMTP_USE_TLS:-true}
+      SMTP_TIMEOUT_SECONDS: ${SMTP_TIMEOUT_SECONDS:-10}
+      IMAP_HOST: ${IMAP_HOST:-}
+      IMAP_PORT: ${IMAP_PORT:-993}
+      IMAP_USER: ${IMAP_USER:-}
+      IMAP_PASSWORD: ${IMAP_PASSWORD:-}
+      IMAP_MAILBOX: ${IMAP_MAILBOX:-INBOX}
+      IMAP_USE_SSL: ${IMAP_USE_SSL:-true}
+      IMAP_TIMEOUT_SECONDS: ${IMAP_TIMEOUT_SECONDS:-10}
+      IMAP_POLL_INTERVAL_SECONDS: ${IMAP_POLL_INTERVAL_SECONDS:-60}
+      GEMINI_API_KEY: ${GEMINI_API_KEY:-}
+    volumes:
+      - guardian-data:/data
+    expose:
+      - "8000"
+    networks:
+      - private
+      - egress
+    depends_on:
+      guardian-mcp-invitations:
+        condition: service_healthy
+      guardian-mcp-catering:
+        condition: service_healthy
+  guardian-mcp-invitations:
+    build: .
+    command: ["python3", "-m", "backend.official_mcp_server"]
+    environment:
+      DB_PATH: /data/guardian.sqlite3
+      MCP_ROLE: invitations
+      MCP_HOST: 0.0.0.0
+      MCP_PORT: 8010
+      MCP_ALLOW_PRIVATE_BIND: "true"
+      INVITATIONS_TOKEN: ${INVITATIONS_TOKEN:?set INVITATIONS_TOKEN}
+    volumes:
+      - guardian-data:/data
+    expose:
+      - "8010"
+    networks:
+      - private
+    healthcheck:
+      test: ["CMD", "python3", "-c", "import socket; socket.create_connection(('127.0.0.1', 8010), timeout=2).close()"]
+      interval: 5s
+      timeout: 3s
+      retries: 12
+  guardian-mcp-catering:
+    build: .
+    command: ["python3", "-m", "backend.official_mcp_server"]
+    depends_on:
+      guardian-mcp-invitations:
+        condition: service_healthy
+    environment:
+      DB_PATH: /data/guardian.sqlite3
+      MCP_ROLE: catering
+      MCP_HOST: 0.0.0.0
+      MCP_PORT: 8011
+      MCP_ALLOW_PRIVATE_BIND: "true"
+      CATERING_TOKEN: ${CATERING_TOKEN:?set CATERING_TOKEN}
+    volumes:
+      - guardian-data:/data
+    expose:
+      - "8011"
+    networks:
+      - private
+    healthcheck:
+      test: ["CMD", "python3", "-c", "import socket; socket.create_connection(('127.0.0.1', 8011), timeout=2).close()"]
+      interval: 5s
+      timeout: 3s
+      retries: 12
+  caddy:
+    image: caddy:2
+    depends_on:
+      - guardian-api
+    ports:
+      - "127.0.0.1:8443:443"
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy-data:/data
+      - caddy-config:/config
+    networks:
+      - private
+
+volumes:
+  guardian-data:
+  caddy-data:
+  caddy-config:
+
+networks:
+  private:
+    internal: true
+  egress:

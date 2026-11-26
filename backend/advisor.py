@@ -17,10 +17,9 @@ import urllib.error
 import urllib.request
 from typing import Any
 
-GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", "")
 GEMINI_URL = (
     "https://generativelanguage.googleapis.com/v1beta/models/"
-    "gemini-2.0-flash:generateContent?key={key}"
+    "gemini-2.0-flash:generateContent"
 )
 
 
@@ -35,7 +34,8 @@ def _build_context(state: dict[str, Any]) -> str:
 
 def _call_gemini(prompt: str) -> str:
     """POST to Gemini and return the text of the first candidate."""
-    if not GEMINI_API_KEY:
+    api_key = os.environ.get("GEMINI_API_KEY", "")
+    if not api_key:
         raise RuntimeError("GEMINI_API_KEY not set")
 
     body = json.dumps({
@@ -43,11 +43,10 @@ def _call_gemini(prompt: str) -> str:
         "generationConfig": {"temperature": 0.3, "maxOutputTokens": 512},
     }).encode("utf-8")
 
-    url = GEMINI_URL.format(key=GEMINI_API_KEY)
     req = urllib.request.Request(
-        url,
+        GEMINI_URL,
         data=body,
-        headers={"Content-Type": "application/json"},
+        headers={"Content-Type": "application/json", "x-goog-api-key": api_key},
         method="POST",
     )
     with urllib.request.urlopen(req, timeout=15) as resp:  # noqa: S310

@@ -7,6 +7,15 @@
   "scripts": {
     "dev": "vite",
     "build": "tsc -b && vite build",
+    "test": "python3 -m unittest backend.test_guardian",
+    "test:e2e": "playwright test",
+    "benchmark:review": "python3 -m backend.reviewer_benchmark --runs 20",
+    "env:init": "python3 -m backend.api init-env",
+    "env:status": "python3 -m backend.api config-status",
+    "agent:invitations": "python3 -m backend.live_agents --role invitations",
+    "agent:catering": "python3 -m backend.live_agents --role catering",
+    "mcp:invitations": "MCP_ROLE=invitations MCP_PORT=8010 python3 -m backend.official_mcp_server",
+    "mcp:catering": "MCP_ROLE=catering MCP_PORT=8011 python3 -m backend.official_mcp_server",
     "preview": "vite preview --host 0.0.0.0"
   },
   "dependencies": {
@@ -17,6 +26,7 @@
     "tailwindcss": "^4.1.17"
   },
   "devDependencies": {
+    "@playwright/test": "^1.65.1",
     "@types/react": "^19.0.0",
     "@types/react-dom": "^19.0.0",
     "@vitejs/plugin-react": "^4.3.4",

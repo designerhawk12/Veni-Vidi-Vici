@@ -5,9 +5,11 @@ import json
 import math
 import os
 import secrets
+import smtplib
 import sqlite3
 import uuid
 from contextlib import contextmanager
+from email.message import EmailMessage
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Iterator
@@ -193,6 +195,8 @@ CREATE TABLE IF NOT EXISTS approvals (
   bound_versions_json TEXT NOT NULL CHECK (json_valid(bound_versions_json)),
   approver TEXT NOT NULL REFERENCES principals(id),
   approved_at TEXT NOT NULL,
+  expires_at TEXT,
+  revoked_at TEXT,
   status TEXT NOT NULL CHECK (status IN ('active', 'invalidated', 'used', 'revoked')),
   reason TEXT,
   FOREIGN KEY (action_id, revision) REFERENCES action_revisions(action_id, revision)
@@ -275,12 +279,40 @@ CREATE TABLE IF NOT EXISTS audit_log (
   ts TEXT NOT NULL,
   actor TEXT NOT NULL,
   event TEXT NOT NULL,
-  payload_json TEXT NOT NULL CHECK (json_valid(payload_json))
+  payload_json TEXT NOT NULL CHECK (json_valid(payload_json)),
+  prev_hash TEXT,
+  entry_hash TEXT
+);
+
+CREATE TABLE IF NOT EXISTS review_records (
+  id TEXT PRIMARY KEY,
+  workspace_id TEXT NOT NULL REFERENCES workspaces(id),
+  review_key TEXT NOT NULL,
+  status TEXT NOT NULL CHECK (status IN ('current','stale','unavailable')),
+  result_json TEXT NOT NULL CHECK (json_valid(result_json)),
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL
+);
+CREATE UNIQUE INDEX IF NOT EXISTS uq_review_key
+  ON review_records(workspace_id, review_key);
+
+CREATE TABLE IF NOT EXISTS progress_events (
+  id TEXT PRIMARY KEY,
+  workspace_id TEXT NOT NULL REFERENCES workspaces(id),
+  actor TEXT NOT NULL REFERENCES principals(id),
+  claim_type TEXT NOT NULL CHECK (claim_type IN ('observation','progress')),
+  task_id TEXT,
+  revision_id INTEGER,
+  payload_json TEXT NOT NULL CHECK (json_valid(payload_json)),
+  created_at TEXT NOT NULL
 );
 
 CREATE TRIGGER IF NOT EXISTS audit_no_update
 BEFORE UPDATE ON audit_log
-BEGIN SELECT RAISE(ABORT, 'audit_log is append-only'); END;
+BEGIN
+  SELECT RAISE(ABORT, 'audit_log is append-only')
+  WHERE OLD.entry_hash IS NOT NULL;
+END;
 CREATE TRIGGER IF NOT EXISTS audit_no_delete
 BEFORE DELETE ON audit_log
 BEGIN SELECT RAISE(ABORT, 'audit_log is append-only'); END;
@@ -389,6 +421,30 @@ class GuardianStore:
     def initialize(self) -> None:
         with self.connect() as connection:
             connection.executescript(SCHEMA)
+            connection.execute("DROP TRIGGER IF EXISTS audit_no_update")
+            connection.execute(
+                """CREATE TRIGGER audit_no_update
+                   BEFORE UPDATE ON audit_log
+                   BEGIN
+                     SELECT RAISE(ABORT, 'audit_log is append-only')
+                     WHERE OLD.entry_hash IS NOT NULL;
+                   END"""
+            )
+            approval_columns = {
+                row["name"] for row in connection.execute("PRAGMA table_info(approvals)")
+            }
+            if "expires_at" not in approval_columns:
+                connection.execute("ALTER TABLE approvals ADD COLUMN expires_at TEXT")
+            if "revoked_at" not in approval_columns:
+                connection.execute("ALTER TABLE approvals ADD COLUMN revoked_at TEXT")
+            audit_columns = {
+                row["name"] for row in connection.execute("PRAGMA table_info(audit_log)")
+            }
+            if "prev_hash" not in audit_columns:
+                connection.execute("ALTER TABLE audit_log ADD COLUMN prev_hash TEXT")
+            if "entry_hash" not in audit_columns:
+                connection.execute("ALTER TABLE audit_log ADD COLUMN entry_hash TEXT")
+            self._backfill_audit_hashes(connection)
         with self.connect() as connection, transaction(connection):
             exists = connection.execute(
                 "SELECT 1 FROM workspaces WHERE id = ?", (WORKSPACE_ID,)
@@ -460,6 +516,53 @@ class GuardianStore:
                    VALUES('catering-vendor', ?, 'service', 'vendor')""",
                 (WORKSPACE_ID,),
             )
+            configured_domains = [
+                domain.strip().lower()
+                for domain in os.environ.get("GUARDIAN_ALLOWED_RECIPIENT_DOMAINS", "").split(",")
+                if domain.strip()
+            ]
+            invalid_domains = [
+                domain for domain in configured_domains
+                if len(domain) > 253
+                or not all(
+                    label and len(label) <= 63
+                    and label[0].isalnum() and label[-1].isalnum()
+                    and all(character.isalnum() or character == "-" for character in label)
+                    for label in domain.split(".")
+                )
+            ]
+            if invalid_domains:
+                raise GuardianError(
+                    "INVALID_CONFIGURATION",
+                    "GUARDIAN_ALLOWED_RECIPIENT_DOMAINS contains an invalid domain.",
+                    500,
+                )
+            connection.executemany(
+                "INSERT OR IGNORE INTO allowlist_domains(workspace_id, domain) VALUES(?, ?)",
+                [(WORKSPACE_ID, domain) for domain in configured_domains],
+            )
+            if self.seed_demo:
+                existing_fact_count = connection.execute(
+                    "SELECT COUNT(*) AS count FROM facts WHERE workspace_id = ?",
+                    (WORKSPACE_ID,),
+                ).fetchone()["count"]
+                if existing_fact_count == 0:
+                    timestamp = utc_now()
+                    connection.executemany(
+                        """INSERT INTO facts
+                           (workspace_id, fact_id, version, value_json, status, changed_by, changed_at)
+                           VALUES(?, ?, 1, ?, 'owner_confirmed', 'owner', ?)""",
+                        [
+                            (WORKSPACE_ID, fact_id, canonical_json(value), timestamp)
+                            for fact_id, value in SEED_FACTS.items()
+                        ],
+                    )
+                    self._audit(
+                        connection,
+                        "system",
+                        "workspace_seeded",
+                        {"workspace_id": WORKSPACE_ID, "facts": sorted(SEED_FACTS)},
+                    )
             connection.execute(
                 """INSERT OR IGNORE INTO vendors(id, workspace_id, name, email, kind)
                    VALUES('catering-vendor', ?, 'TechMeet Catering', 'catering@vendor.test', 'catering')""",
@@ -497,10 +600,55 @@ class GuardianStore:
     def _audit(
         self, connection: sqlite3.Connection, actor: str, event: str, payload: dict[str, Any]
     ) -> None:
+        timestamp = utc_now()
+        payload_json = canonical_json(payload)
+        previous = connection.execute(
+            "SELECT entry_hash FROM audit_log WHERE workspace_id = ? ORDER BY seq DESC LIMIT 1",
+            (WORKSPACE_ID,),
+        ).fetchone()
+        previous_hash = previous["entry_hash"] if previous and previous["entry_hash"] else "GENESIS"
+        entry_payload = canonical_json({
+            "workspace_id": WORKSPACE_ID,
+            "timestamp": timestamp,
+            "actor": actor,
+            "event": event,
+            "payload": payload,
+            "previous_hash": previous_hash,
+        })
+        entry_hash = hashlib.sha256(entry_payload.encode("utf-8")).hexdigest()
         connection.execute(
-            "INSERT INTO audit_log(workspace_id, ts, actor, event, payload_json) VALUES(?, ?, ?, ?, ?)",
-            (WORKSPACE_ID, utc_now(), actor, event, canonical_json(payload)),
+            """INSERT INTO audit_log
+               (workspace_id, ts, actor, event, payload_json, prev_hash, entry_hash)
+               VALUES(?, ?, ?, ?, ?, ?, ?)""",
+            (WORKSPACE_ID, timestamp, actor, event, payload_json, previous_hash, entry_hash),
         )
+
+    def _backfill_audit_hashes(self, connection: sqlite3.Connection) -> None:
+        rows = connection.execute(
+            """SELECT seq, workspace_id, ts, actor, event, payload_json, prev_hash, entry_hash
+               FROM audit_log WHERE workspace_id = ? ORDER BY seq""",
+            (WORKSPACE_ID,),
+        ).fetchall()
+        previous_hash = "GENESIS"
+        for row in rows:
+            if row["prev_hash"] and row["entry_hash"]:
+                previous_hash = row["entry_hash"]
+                continue
+            payload = json.loads(row["payload_json"])
+            entry_payload = canonical_json({
+                "workspace_id": row["workspace_id"],
+                "timestamp": row["ts"],
+                "actor": row["actor"],
+                "event": row["event"],
+                "payload": payload,
+                "previous_hash": previous_hash,
+            })
+            entry_hash = hashlib.sha256(entry_payload.encode("utf-8")).hexdigest()
+            connection.execute(
+                "UPDATE audit_log SET prev_hash = ?, entry_hash = ? WHERE seq = ?",
+                (previous_hash, entry_hash, row["seq"]),
+            )
+            previous_hash = entry_hash
 
     def current_facts(self) -> list[dict[str, Any]]:
         with self.connect() as connection:
@@ -541,6 +689,11 @@ class GuardianStore:
                 """UPDATE facts SET status = 'superseded'
                    WHERE workspace_id = ? AND fact_id = ? AND version = ?""",
                 (WORKSPACE_ID, fact_id, old_version),
+            )
+            connection.execute(
+                """UPDATE review_records SET status = 'stale', updated_at = ?
+                   WHERE workspace_id = ? AND status = 'current'""",
+                (utc_now(), WORKSPACE_ID),
             )
             connection.execute(
                 """INSERT INTO facts
@@ -712,7 +865,13 @@ class GuardianStore:
                     (WORKSPACE_ID, action_id, revision, fact_id, fact["version"]),
                 )
 
-    def approve_action(self, principal_id: str, action_id: str, revision: int) -> dict[str, Any]:
+    def approve_action(
+        self,
+        principal_id: str,
+        action_id: str,
+        revision: int,
+        expires_at: str | None = None,
+    ) -> dict[str, Any]:
         with self.connect() as connection, transaction(connection):
             self._require_owner(connection, principal_id)
             action = connection.execute(
@@ -733,11 +892,21 @@ class GuardianStore:
                 raise GuardianError("DEPENDENCIES_MISSING", "One or more required facts are not confirmed.", next_step="Confirm the missing facts before approval.")
             if not self._versions_are_current(connection, versions):
                 raise GuardianError("STALE_FACT", "The action depends on outdated fact versions.", next_step="Create a new action revision against current facts.")
+            if expires_at:
+                try:
+                    expiry = datetime.fromisoformat(expires_at.replace("Z", "+00:00"))
+                    if expiry.tzinfo is None:
+                        expiry = expiry.replace(tzinfo=timezone.utc)
+                    if expiry <= datetime.now(timezone.utc):
+                        raise GuardianError("APPROVAL_EXPIRED", "Approval expiry must be in the future.", 400)
+                except ValueError as error:
+                    raise GuardianError("INVALID_REQUEST", "expires_at must be a valid ISO timestamp.", 400) from error
             approval_id = str(uuid.uuid4())
             connection.execute(
                 """INSERT INTO approvals
-                   (id, workspace_id, action_id, revision, params_hash, bound_versions_json, approver, approved_at, status)
-                   VALUES(?, ?, ?, ?, ?, ?, ?, ?, 'active')""",
+                   (id, workspace_id, action_id, revision, params_hash, bound_versions_json,
+                    approver, approved_at, expires_at, status)
+                   VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, 'active')""",
                 (
                     approval_id,
                     WORKSPACE_ID,
@@ -747,6 +916,7 @@ class GuardianStore:
                     canonical_json(versions),
                     principal_id,
                     utc_now(),
+                    expires_at,
                 ),
             )
             connection.execute(
@@ -797,6 +967,49 @@ class GuardianStore:
                 "revision": revision,
                 "status": "rejected",
                 "reason": reason.strip(),
+            }
+
+    def revoke_approval(
+        self,
+        principal_id: str,
+        action_id: str,
+        revision: int,
+        reason: str = "",
+    ) -> dict[str, Any]:
+        with self.connect() as connection, transaction(connection):
+            self._require_owner(connection, principal_id)
+            approval = connection.execute(
+                """SELECT id, status FROM approvals
+                   WHERE workspace_id = ? AND action_id = ? AND revision = ? AND status = 'active'
+                   ORDER BY approved_at DESC LIMIT 1""",
+                (WORKSPACE_ID, action_id, revision),
+            ).fetchone()
+            if approval is None:
+                raise GuardianError("APPROVAL_MISMATCH", "No active approval exists to revoke.", 409)
+            timestamp = utc_now()
+            connection.execute(
+                """UPDATE approvals
+                   SET status = 'revoked', revoked_at = ?, reason = ?
+                   WHERE id = ?""",
+                (timestamp, reason.strip() or None, approval["id"]),
+            )
+            connection.execute(
+                """UPDATE action_revisions SET status = 'drafted'
+                   WHERE action_id = ? AND revision = ?""",
+                (action_id, revision),
+            )
+            self._audit(
+                connection,
+                principal_id,
+                "approval_revoked",
+                {"approval_id": approval["id"], "action_id": action_id, "revision": revision, "reason": reason.strip()},
+            )
+            return {
+                "id": approval["id"],
+                "action_id": action_id,
+                "revision": revision,
+                "status": "revoked",
+                "revoked_at": timestamp,
             }
 
     def claim_action(self, principal_id: str, action_id: str, revision: int) -> dict[str, Any]:
@@ -854,6 +1067,20 @@ class GuardianStore:
                 ).fetchone()
                 if approval is None:
                     return self._deny(connection, principal_id, action_id, revision, "NO_ACTIVE_APPROVAL", "No active owner approval exists.", "Request approval for the exact current revision.")
+                expires_at = approval["expires_at"]
+                if expires_at:
+                    try:
+                        expiry = datetime.fromisoformat(expires_at.replace("Z", "+00:00"))
+                        if expiry.tzinfo is None:
+                            expiry = expiry.replace(tzinfo=timezone.utc)
+                        if expiry <= datetime.now(timezone.utc):
+                            connection.execute(
+                                "UPDATE approvals SET status = 'invalidated', reason = 'Expired before execution.' WHERE id = ?",
+                                (approval["id"],),
+                            )
+                            return self._deny(connection, principal_id, action_id, revision, "APPROVAL_EXPIRED", "The active approval has expired.", "Request a new approval.")
+                    except ValueError:
+                        return self._deny(connection, principal_id, action_id, revision, "APPROVAL_EXPIRED", "The approval expiry is invalid.", "Request a new approval.")
                 if approval["params_hash"] != row["params_hash"]:
                     return self._deny(connection, principal_id, action_id, revision, "PARAMS_CHANGED", "Current parameters differ from the approved parameters.", "Create a new revision and obtain approval.")
                 if json.loads(approval["bound_versions_json"]) != versions:
@@ -1288,7 +1515,7 @@ class GuardianStore:
     def dispatch_to_local_catcher(
         self, principal_id: str, action_id: str, revision: int, simulate_timeout: bool = False
     ) -> dict[str, Any]:
-        with self.connect() as connection, transaction(connection):
+        with self.connect() as connection:
             principal = self._principal(connection, principal_id)
             if principal["kind"] not in ("agent", "owner"):
                 raise GuardianError("SCOPE", "Principal cannot trigger local mail catcher dispatch.", 403)
@@ -1306,9 +1533,36 @@ class GuardianStore:
             params = json.loads(claim["params_json"])
             recipients = params.get("recipients") or ([params["recipient"]] if "recipient" in params else ["local@example.test"])
             recipient = recipients[0] if isinstance(recipients, list) and recipients else "local@example.test"
-            status = "unknown" if simulate_timeout else "provider_accepted"
             msg_id = str(uuid.uuid4())
             token = f"msg-{uuid.uuid4().hex[:10]}"
+
+        status = "unknown" if simulate_timeout else "provider_accepted"
+        smtp_host = os.environ.get("SMTP_HOST", "").strip()
+        if smtp_host and not simulate_timeout:
+            try:
+                message = EmailMessage()
+                message["Subject"] = f"Event Guardian confirmation {token}"
+                message["From"] = os.environ.get("SMTP_FROM", "guardian@example.test")
+                message["To"] = str(recipient)
+                message.set_content(
+                    "Event Guardian controlled action notification.\n"
+                    f"Correlation token: {token}\n"
+                    "This is a synthetic event coordination test; do not reply with operational instructions."
+                )
+                smtp_port = int(os.environ.get("SMTP_PORT", "587"))
+                timeout = float(os.environ.get("SMTP_TIMEOUT_SECONDS", "10"))
+                with smtplib.SMTP(smtp_host, smtp_port, timeout=timeout) as smtp:
+                    if os.environ.get("SMTP_USE_TLS", "true").lower() == "true":
+                        smtp.starttls()
+                    smtp_user = os.environ.get("SMTP_USER", "")
+                    smtp_password = os.environ.get("SMTP_PASSWORD", "")
+                    if smtp_user:
+                        smtp.login(smtp_user, smtp_password)
+                    smtp.send_message(message)
+            except (smtplib.SMTPException, OSError, TimeoutError, ValueError):
+                status = "unknown"
+
+        with self.connect() as connection, transaction(connection):
             connection.execute(
                 """INSERT INTO outbound_messages
                    (id, workspace_id, action_id, revision, claim_id, correlation_token, recipient, status, created_at)
@@ -1317,19 +1571,25 @@ class GuardianStore:
             )
             connection.execute(
                 "UPDATE action_revisions SET status = ? WHERE action_id = ? AND revision = ?",
-                ("unknown" if simulate_timeout else "provider_accepted", action_id, revision),
+                ("unknown" if status == "unknown" else "provider_accepted", action_id, revision),
             )
             connection.execute(
                 "UPDATE execution_claims SET status = ? WHERE id = ?",
-                ("unknown" if simulate_timeout else "dispatched", claim["id"]),
+                ("unknown" if status == "unknown" else "dispatched", claim["id"]),
             )
             self._audit(
                 connection,
                 principal_id,
-                "local_catcher_dispatch",
-                {"message_id": msg_id, "action_id": action_id, "revision": revision, "status": status},
+                "connector_dispatch",
+                {
+                    "message_id": msg_id,
+                    "action_id": action_id,
+                    "revision": revision,
+                    "status": status,
+                    "transport": "smtp" if smtp_host else "mail_catcher",
+                },
             )
-            return {"message_id": msg_id, "status": status, "correlation_token": token, "recipient": str(recipient)}
+        return {"message_id": msg_id, "status": status, "correlation_token": token, "recipient": str(recipient)}
 
     def reconcile_outbound(self, principal_id: str, message_id: str, found_in_mailbox: bool) -> dict[str, Any]:
         with self.connect() as connection, transaction(connection):
@@ -1357,6 +1617,47 @@ class GuardianStore:
                 {"message_id": message_id, "status": new_status},
             )
             return {"message_id": message_id, "status": new_status}
+
+    def record_agent_claim(self, principal_id: str, claim_type: str, payload: dict[str, Any]) -> dict[str, Any]:
+        if claim_type not in ("observation", "progress"):
+            raise GuardianError("INVALID_REQUEST", "Unsupported agent claim type.", 400)
+        with self.connect() as connection, transaction(connection):
+            principal = self._principal(connection, principal_id)
+            if principal["kind"] != "agent":
+                raise GuardianError("AGENT_REQUIRED", "Only an agent may record progress or observations.", 403)
+            event_id = str(uuid.uuid4())
+            connection.execute(
+                """INSERT INTO progress_events
+                   (id, workspace_id, actor, claim_type, task_id, revision_id, payload_json, created_at)
+                   VALUES(?, ?, ?, ?, ?, ?, ?, ?)""",
+                (
+                    event_id,
+                    WORKSPACE_ID,
+                    principal_id,
+                    claim_type,
+                    payload.get("task_id") if claim_type == "progress" else None,
+                    payload.get("revision_id") if claim_type == "progress" else None,
+                    canonical_json(payload),
+                    utc_now(),
+                ),
+            )
+            self._audit(
+                connection,
+                principal_id,
+                f"agent_{claim_type}",
+                payload,
+            )
+            seq = connection.execute(
+                "SELECT MAX(seq) AS seq FROM audit_log WHERE workspace_id = ?",
+                (WORKSPACE_ID,),
+            ).fetchone()["seq"]
+            return {
+                "recorded": True,
+                "claim_type": claim_type,
+                "authority": "agent_claim",
+                "audit_seq": seq,
+                "payload": payload,
+            }
 
     def evaluate_review(self) -> dict[str, Any]:
         with self.connect() as connection:
@@ -1430,7 +1731,7 @@ class GuardianStore:
                     "detail": "No confirmed 'accessibility.step_free' fact is recorded for the current venue.",
                     "suggestion": "Confirm venue accessibility or add 'accessibility.step_free' fact in Goals & Facts.",
                 })
-            return {
+            result = {
                 "status": "CURRENT",
                 "budget": {
                     "cap": int(budget_cap),
@@ -1443,6 +1744,43 @@ class GuardianStore:
                 },
                 "findings": findings,
             }
+            review_key = hashlib.sha256(canonical_json({
+                "facts": {
+                    key: {"version": value["version"], "value": value["value"]}
+                    for key, value in sorted(facts.items())
+                },
+                "budget": result["budget"],
+                "open_obligations": [row["id"] for row in open_obligations],
+            }).encode("utf-8")).hexdigest()
+            existing = connection.execute(
+                """SELECT result_json, status FROM review_records
+                   WHERE workspace_id = ? AND review_key = ?""",
+                (WORKSPACE_ID, review_key),
+            ).fetchone()
+            if existing and existing["status"] == "current":
+                cached = json.loads(existing["result_json"])
+                cached["review_key"] = review_key
+                cached["deduplicated"] = True
+                return cached
+            timestamp = utc_now()
+            connection.execute(
+                """INSERT INTO review_records
+                   (id, workspace_id, review_key, status, result_json, created_at, updated_at)
+                   VALUES(?, ?, ?, 'current', ?, ?, ?)
+                   ON CONFLICT(workspace_id, review_key) DO UPDATE SET
+                     status='current', result_json=excluded.result_json, updated_at=excluded.updated_at""",
+                (
+                    str(uuid.uuid4()),
+                    WORKSPACE_ID,
+                    review_key,
+                    canonical_json(result),
+                    timestamp,
+                    timestamp,
+                ),
+            )
+            result["review_key"] = review_key
+            result["deduplicated"] = False
+            return result
 
     def state(self) -> dict[str, Any]:
         with self.connect() as connection:
@@ -1853,7 +2191,7 @@ class GuardianStore:
     def audit(self, since: int = 0) -> list[dict[str, Any]]:
         with self.connect() as connection:
             rows = connection.execute(
-                """SELECT seq, ts, actor, event, payload_json FROM audit_log
+                """SELECT seq, ts, actor, event, payload_json, prev_hash, entry_hash FROM audit_log
                    WHERE workspace_id = ? AND seq > ? ORDER BY seq""",
                 (WORKSPACE_ID, since),
             ).fetchall()
@@ -1864,9 +2202,36 @@ class GuardianStore:
                     "actor": row["actor"],
                     "event": row["event"],
                     "payload": json.loads(row["payload_json"]),
+                    "prev_hash": row["prev_hash"],
+                    "entry_hash": row["entry_hash"],
                 }
                 for row in rows
             ]
+
+    def verify_audit(self) -> dict[str, Any]:
+        with self.connect() as connection:
+            rows = connection.execute(
+                """SELECT seq, ts, actor, event, payload_json, prev_hash, entry_hash
+                   FROM audit_log WHERE workspace_id = ? ORDER BY seq""",
+                (WORKSPACE_ID,),
+            ).fetchall()
+        previous_hash = "GENESIS"
+        for row in rows:
+            if row["prev_hash"] != previous_hash:
+                return {"valid": False, "verified_through": row["seq"] - 1, "broken_at": row["seq"]}
+            entry_payload = canonical_json({
+                "workspace_id": WORKSPACE_ID,
+                "timestamp": row["ts"],
+                "actor": row["actor"],
+                "event": row["event"],
+                "payload": json.loads(row["payload_json"]),
+                "previous_hash": previous_hash,
+            })
+            calculated = hashlib.sha256(entry_payload.encode("utf-8")).hexdigest()
+            if row["entry_hash"] != calculated:
+                return {"valid": False, "verified_through": row["seq"] - 1, "broken_at": row["seq"]}
+            previous_hash = calculated
+        return {"valid": True, "verified_through": rows[-1]["seq"] if rows else 0, "entries": len(rows)}
 
     def _action_detail(self, connection: sqlite3.Connection, action_id: str) -> dict[str, Any]:
         row = connection.execute(

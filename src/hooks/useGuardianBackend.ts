@@ -207,13 +207,27 @@ export function useGuardianBackend() {
     return () => { active = false }
   }, [enabled])
 
-  const mutate = useCallback(async (operation: () => Promise<unknown>) => {
+  useEffect(() => {
     if (!enabled) return
+    const events = new EventSource('/api/events?since=0')
+    const handleStateChange = () => {
+      void refresh()
+    }
+    events.addEventListener('state-change', handleStateChange)
+    events.onerror = () => {
+      // The dashboard remains usable through explicit refresh and API mutations.
+    }
+    return () => events.close()
+  }, [enabled, refresh])
+
+  const mutate = useCallback(async (operation: () => Promise<unknown>) => {
+    if (!enabled) return false
     setBusy(true)
     setError('')
     try {
       await operation()
       await refresh()
+      return true
     } catch (cause) {
       const message = cause instanceof Error ? cause.message : 'Guardian API operation failed.'
       try {
@@ -221,9 +235,10 @@ export function useGuardianBackend() {
       } catch (refreshCause) {
         const refreshMessage = refreshCause instanceof Error ? refreshCause.message : 'The backend state could not be refreshed.'
         setError(`${message} ${refreshMessage}`)
-        return
+        return false
       }
       setError(message)
+      return false
     } finally {
       setBusy(false)
     }
@@ -295,6 +310,8 @@ export function useGuardianBackend() {
     reviewData: snapshot?.review ?? null,
     factProposals: snapshot?.state.fact_proposals ?? [],
     outboundMessages: snapshot?.state.outbound_messages ?? [],
+    context: (role: 'invitations' | 'catering') => guardianApi.context(role),
+    priorities: (role: 'invitations' | 'catering') => guardianApi.priorities(role),
     activities,
     decision,
     vendorConfirmed,
@@ -310,6 +327,9 @@ export function useGuardianBackend() {
       mutate(() => guardianApi.createAction(type, params, required, role)),
     approveAction: (actionId: string, revision: number) => mutate(() => guardianApi.approve(actionId, revision)),
     rejectAction: (actionId: string, revision: number, reason: string) => mutate(() => guardianApi.reject(actionId, revision, reason)),
+    revokeApproval: (actionId: string, revision: number, reason = '') =>
+      mutate(() => guardianApi.revoke(actionId, revision, reason)),
+    verifyAudit: () => guardianApi.verifyAudit(),
     claimAction: (actionId: string, revision: number, role: 'invitations' | 'catering' = 'invitations') =>
       mutate(() => guardianApi.claim(actionId, revision, role)),
     approveInvitation: () => mutate(async () => {

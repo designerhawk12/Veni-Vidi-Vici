@@ -10,14 +10,15 @@ const items: { id: PageId; label: string; icon: typeof Compass }[] = [
 ]
 
 interface SidebarProps {
-  page: PageId
+  page: PageId | null
   workspaceName?: string
+  workspaceReady: boolean
   onNavigate: (page: PageId) => void
   open: boolean
   onClose: () => void
 }
 
-export default function Sidebar({ page, workspaceName = 'New Workspace', onNavigate, open, onClose }: SidebarProps) {
+export default function Sidebar({ page, workspaceName = 'No workspace yet', workspaceReady, onNavigate, open, onClose }: SidebarProps) {
   return <>
     <div className={`sidebar-scrim ${open ? 'is-open' : ''}`} onClick={onClose} aria-hidden="true" />
     <aside className={`sidebar ${open ? 'sidebar-open' : ''}`}>
@@ -28,7 +29,7 @@ export default function Sidebar({ page, workspaceName = 'New Workspace', onNavig
       </div>
       <div className="nav-caption">WORKSPACE</div>
       <nav className="side-nav" aria-label="Main navigation">
-        {items.map(({ id, label, icon: Icon }) => <button key={id} className={`nav-item ${page === id ? 'active' : ''}`} aria-current={page === id ? 'page' : undefined} onClick={() => { onNavigate(id); onClose() }}>
+        {items.map(({ id, label, icon: Icon }) => <button key={id} className={`nav-item ${page === id ? 'active' : ''}`} aria-current={page === id ? 'page' : undefined} disabled={!workspaceReady} title={!workspaceReady ? 'Create a workspace to open this section' : undefined} onClick={() => { onNavigate(id); onClose() }}>
           <Icon size={18} strokeWidth={1.9} /><span>{label}</span>{page === id && <span className="nav-current" />}
         </button>)}
       </nav>

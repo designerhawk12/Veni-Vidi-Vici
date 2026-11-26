@@ -92,19 +92,15 @@ The console follows the dark-first neutral palette and evidence-led status vocab
 
 The API-connected dashboard reads facts, actions, readiness, and audit history from SQLite. Owner venue changes, proposal approval/rejection, execution claims, and the pause switch are persisted by the backend. The Vite development server adds bearer credentials on the server side; those tokens are not embedded in browser JavaScript. Keep the development server bound to localhost.
 
-Create a local token file (it is git-ignored) and replace the example values with distinct random tokens of at least 32 characters:
+Create a private local token file (git-ignored) with four distinct cryptographically-random tokens:
 
 ```sh
-cp .env.example .env.local
-python3 -c 'from pathlib import Path; import secrets; p=Path(".env.local"); names=("OWNER_TOKEN", "INVITATIONS_TOKEN", "CATERING_TOKEN", "VENDOR_TOKEN"); values={name: secrets.token_urlsafe(32) for name in names}; p.write_text("GUARDIAN_API_ENABLED=true\nGUARDIAN_API_TARGET=http://127.0.0.1:8000\n" + "".join(f"{name}={value}\n" for name, value in values.items()))'
+python3 -m backend.api init-env
 ```
 
-In one terminal, load the same local-only credentials and start the API:
+To fix permissions on a file created by an older setup, startup tightens `.env.local` to owner-only access. Add real provider credentials only to that ignored file (never commit them): `GEMINI_API_KEY`, `SMTP_HOST`/`SMTP_PORT`/`SMTP_USER`/`SMTP_PASSWORD`, and `IMAP_HOST`/`IMAP_PORT`/`IMAP_USER`/`IMAP_PASSWORD`. Run `python3 -m backend.api config-status` to check which integrations are configured; it never prints values. The API loads `.env.local` automatically, so no `source` step is needed:
 
 ```sh
-set -a
-. ./.env.local
-set +a
 python3 -m backend.api serve
 ```
 
@@ -116,23 +112,25 @@ pnpm dev
 
 Open `/demo`. The dashboard indicates whether the API is connected and reports failures instead of silently falling back to simulated state. “Refresh” reloads backend state; it does not erase it. To reset the persistent database, stop the API and run `python3 -m backend.api reset`.
 
-The vendor confirmation controls remain unavailable in the owner dashboard: the frontend does not impersonate the vendor service. Vendor evidence must arrive through the vendor-authenticated API route or a future inbox integration. An execution claim records authorization only; it does not send an email. The reviewer card is also marked unavailable in API mode because no reviewer service is implemented.
+The vendor confirmation controls remain unavailable in the owner dashboard: the frontend does not impersonate the vendor service. Vendor evidence can arrive through the vendor-authenticated API route or configured IMAP polling. A claim records authorization only; a separate guarded dispatch sends only if SMTP is configured. The allowlist defaults to `example.test,vendor.test`; set `GUARDIAN_ALLOWED_RECIPIENT_DOMAINS` to explicit test mailbox domains when configuring SMTP. Do not broaden it to arbitrary domains.
 
 ## Guardian API
 
-The backend uses only Python's standard library. Run its unit tests and start the API from the repository root:
+The API uses Python's standard library. Official MCP Streamable HTTP additionally requires the dependency in `requirements.txt`. Run the test suites from the repository root:
 
 ```sh
-python3 -m unittest backend.test_guardian
-
-export OWNER_TOKEN="$(python3 -c 'import secrets; print(secrets.token_urlsafe(32))')"
-export INVITATIONS_TOKEN="$(python3 -c 'import secrets; print(secrets.token_urlsafe(32))')"
-export CATERING_TOKEN="$(python3 -c 'import secrets; print(secrets.token_urlsafe(32))')"
-export VENDOR_TOKEN="$(python3 -c 'import secrets; print(secrets.token_urlsafe(32))')"
-python3 -m backend.api serve
+pnpm test
+pnpm test:e2e
+pnpm benchmark:review
 ```
 
-The API requires four distinct bearer tokens, each at least 32 characters long. It listens on `http://127.0.0.1:8000` by default. Configure `DB_PATH`, `HOST`, or `PORT` to override the defaults. The initial SQLite database is created at `backend/data/guardian.sqlite3`; stop the API before running `python3 -m backend.api reset` to recreate that seeded database. Do not expose this prototype API or Vite credential proxy to an untrusted network: bearer tokens are local development credentials and both servers are intended for loopback use.
+The API requires four distinct bearer tokens, each at least 32 characters long. It listens on `http://127.0.0.1:8000` by default and loads `.env.local` automatically. Configure `DB_PATH`, `HOST`, or `PORT` to override defaults. Stop the API before `python3 -m backend.api reset`. The deterministic reviewer benchmark compares advisory ON/OFF while the same hard gateway remains active; it is not an LLM-quality benchmark. A real LLM ON/OFF benchmark must use prelabelled fixtures and be run with a configured model key.
+
+For official MCP transport, install `requirements.txt` and start each isolated server with `pnpm mcp:invitations` or `pnpm mcp:catering`. Both require role tokens and bind to loopback by default. For live role proposals, configure `GEMINI_API_KEY` then run `python3 -m backend.live_agents --role invitations` or `--role catering`; each invocation is a fresh, bounded process and returns a proposal only. No live call is made unless explicitly started.
+
+SMTP is used only after an action has a Guardian claim and the separate dispatch route is called. IMAP polling starts automatically when `IMAP_HOST` is configured; it reads unseen plain-text messages and accepts only a correlation token in the subject and a standalone `CONFIRM` or `DECLINE` line. The one-shot poll is also available with `python3 -m backend.imap_connector`.
+
+For local TLS, `docker compose --env-file .env.local up --build` places Caddy in front of the API at `https://localhost:8443` using Caddy's local CA; trust that local CA on your test machine. The two role-scoped MCP services stay on an internal, unpublished network. For a public deployment, add `CADDY_DOMAIN=<your DNS name>` to `.env.local`, point that DNS name at the server, and use `docker compose --env-file .env.local -f docker-compose.yml -f docker-compose.production.yml up --build`; open ports 80/443 at the host firewall and keep the API and MCP containers unpublished. Production requires valid DNS, protected secrets, trusted ACME certificates, and operational monitoring; the compose setup is a starting point, not a complete security certification.
 
 All API routes require a bearer token. The owner token can read `GET /api/state`, `GET /api/readiness`, and `GET /api/audit?since=0`, confirm an existing fact with `POST /api/facts/{fact_id}` (`{"value": ...}`), approve or reject an exact action revision with `POST /api/actions/{id}/approve` (`{"revision": 1}`) or `POST /api/actions/{id}/reject` (`{"revision": 1, "reason": "..."}`), and control `POST /api/killswitch` (`{"enabled": true}`). Agent tokens can propose with `POST /api/actions` (`{"type": "send_invitation_batch", "params": {"recipients": ["guest@example.test"]}}`), revise through `POST /api/actions/{id}/revisions`, and request a guarded claim with `POST /api/actions/{id}/claim` (`{"revision": 1}`). Only `example.test` and `vendor.test` recipients are allowlisted in the fixture.
 
@@ -143,6 +141,8 @@ The seeded mandatory catering obligation is bound to the current owner-confirmed
 ## Verification
 
 pnpm build
+pnpm test
+pnpm test:e2e
 
 
 The build runs TypeScript checking and creates dist/. There are no configured frontend test or lint scripts. The browser-only demo needs no API key or external service. Its mock event, action, approval, evidence, and activity state is centralized in [src/hooks/useDemoScenario.ts](./src/hooks/useDemoScenario.ts) and [src/data/demoData.ts](./src/data/demoData.ts). The API tests cover canonical parameter hashing, owner-only decisions/fact changes, selective invalidation, role restrictions, allowlisting, kill-switch behavior, evidence matching and duplicate claims.
@@ -151,15 +151,18 @@ The build runs TypeScript checking and creates dist/. There are no configured fr
 
 Implemented in the browser are the dashboard, navigation, approval state, version and parameter guards, obligation and evidence matching, derived readiness, budget calculation, activity timeline, responsive presentation, and reset behavior.
 
-In browser-only mode, invitation attempts, provider acceptance, vendor replies, and evidence are simulated in React state. In API mode, event facts, action decisions, claims, readiness, and history come from SQLite. No real agent, MCP server, email delivery, vendor inbox, reviewer model, or AI execution is implemented.
+In browser-only mode, invitation attempts, provider acceptance, vendor replies, and evidence are simulated in React state. In API mode, event facts, action decisions, claims, readiness, and history come from SQLite. Live Gemini role-agent calls, SMTP dispatch, and IMAP polling are opt-in and require working external credentials; they are not exercised by the automated test suite.
 
 ## Future integration roadmap
 
-Next, add scoped agent context, an independent reviewer, and secure connector/vendor-inbox integrations. Preserve the separation between action attempts, provider acceptance, counterparty confirmation, and verified current-version evidence.
+The project has custom and official-SDK MCP surfaces, fresh-process role agents that call their role-scoped HTTP MCP server, scoped context, advisory review tools, optional SMTP/IMAP connectors, SSE state refresh, and chained audit records. The deterministic ON/OFF harness is a regression comparison; a sustained live-model quality benchmark still requires credentials and measured rehearsal runs.
 
 ## Known limits
 
 - One fixed TechMeet 2026 scenario is provided. Event facts and invitation parameters are not editable through the UI; the send guard still checks the approval snapshot and current dependencies.
 - Simulated provider acceptance is a transport readback, not proof of recipient delivery. Synthetic vendor confirmation verifies recorded demo evidence, not actual event execution.
 - Browser scenario state is in memory only and refreshes to the initial post-change scenario; API data persists in SQLite until reset.
-- The API currently seeds one mandatory catering obligation and has no general-purpose obligation editor, agent context, model review, or actual connector dispatch.
+- The API seeds one mandatory catering obligation and has no general-purpose obligation editor.
+- Real SMTP is enabled only through `SMTP_*` environment variables. Real IMAP polling is enabled through `IMAP_*` variables. With no mail host configured, dispatch is disclosed as a local mail-catcher simulation.
+- Live LLM agents require `GEMINI_API_KEY` and a running role MCP server; without either, agent execution returns an explicit unavailable error and does not fabricate a proposal.
+- A production deployment additionally needs a real DNS name, trusted TLS issuance, firewall configuration, and operator-managed secrets. `.env.local` bootstrap creates local bearer tokens but cannot create provider credentials.

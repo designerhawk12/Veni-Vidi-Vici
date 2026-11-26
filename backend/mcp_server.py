@@ -75,6 +75,105 @@ TOOLS = [
         "description": "Run the read-only server-side reviewer for budget, drift, and policy checks.",
         "inputSchema": {"type": "object", "properties": {}},
     },
+    {
+        "name": "list_obligations",
+        "description": "List open obligations and evidence requirements for a role.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {"role": {"type": "string", "enum": ["invitations", "catering"]}},
+            "required": ["role"],
+        },
+    },
+    {
+        "name": "claim_status",
+        "description": "Ask for a computed readiness claim with open requirements.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "role": {"type": "string", "enum": ["invitations", "catering"]},
+                "claim": {"type": "string"},
+            },
+            "required": ["role", "claim"],
+        },
+    },
+    {
+        "name": "reserve_budget",
+        "description": "Create and claim an atomic local budget reservation.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "role": {"type": "string", "enum": ["invitations", "catering"]},
+                "amount": {"type": "integer", "minimum": 1},
+                "category": {"type": "string"},
+            },
+            "required": ["role", "amount"],
+        },
+    },
+    {
+        "name": "record_observation",
+        "description": "Persist an agent observation as a claim, not verified evidence.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "role": {"type": "string", "enum": ["invitations", "catering"]},
+                "kind": {"type": "string"},
+                "data": {"type": "object"},
+            },
+            "required": ["role", "kind", "data"],
+        },
+    },
+    {
+        "name": "get_goals",
+        "description": "Read owner-confirmed goals and facts.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {"role": {"type": "string", "enum": ["invitations", "catering"]}},
+            "required": ["role"],
+        },
+    },
+    {
+        "name": "request_review",
+        "description": "Request a read-only advisory review for the current state.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "role": {"type": "string", "enum": ["invitations", "catering"]},
+                "action_id": {"type": "string"},
+            },
+        },
+    },
+    {
+        "name": "list_findings",
+        "description": "List current role-scoped advisory findings.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {"role": {"type": "string", "enum": ["invitations", "catering"]}},
+            "required": ["role"],
+        },
+    },
+    {
+        "name": "record_progress",
+        "description": "Record a progress claim separately from authoritative evidence.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "role": {"type": "string", "enum": ["invitations", "catering"]},
+                "task_id": {"type": "string"},
+                "revision_id": {"type": "integer"},
+                "observation": {"type": "string"},
+            },
+            "required": ["role", "task_id", "observation"],
+        },
+    },
+    {
+        "name": "recommend_priorities",
+        "description": "Recommend current work order without changing assignments.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {"role": {"type": "string", "enum": ["invitations", "catering"]}},
+            "required": ["role"],
+        },
+    },
 ]
 
 
@@ -98,13 +197,15 @@ def call_tool(store: GuardianStore, name: str, args: dict[str, Any]) -> dict[str
             if not (role == "invitations" and f["id"] == "sponsor.amount")
         ]
         actions = [a for a in state["actions"] if a["proposed_by"] == principal]
-        return {
+        context = {
             "workspace_name": state.get("workspace_name"),
             "kill_switch": state["kill_switch"],
             "facts": facts,
             "actions": actions,
             "open_obligations": readiness["open_obligations"],
         }
+        context["token_count"] = max(1, len(json.dumps(context, sort_keys=True)) // 4)
+        return context
     if name == "propose_action":
         principal = _principal_for_role(args.get("role", ""))
         return store.create_action(principal, args["type"], args["params"], bool(args.get("required", False)))
@@ -119,6 +220,115 @@ def call_tool(store: GuardianStore, name: str, args: dict[str, Any]) -> dict[str
         return store.propose_fact_change(principal, args["fact_id"], args["value"], str(args.get("reason", "")))
     if name == "get_review":
         return store.evaluate_review()
+    if name == "list_obligations":
+        role = args.get("role", "")
+        _principal_for_role(role)
+        readiness = store.readiness()
+        return {
+            "ready": readiness["ready"],
+            "open_obligations": readiness["open_obligations"],
+            "pending_required_actions": readiness["pending_required_actions"],
+        }
+    if name == "claim_status":
+        role = args.get("role", "")
+        _principal_for_role(role)
+        readiness = store.readiness()
+        if readiness["ready"]:
+            return {
+                "claim": "ready",
+                "answer": readiness["label"],
+                "open_items": [],
+                "evidence": readiness["evidence"],
+            }
+        open_items = [
+            obligation["name"] for obligation in readiness["open_obligations"]
+        ] + [
+            action["reason"] or action["type"]
+            for action in readiness["pending_required_actions"]
+        ]
+        return {
+            "claim": "not_ready",
+            "answer": "Refused: recorded arrangements are not ready.",
+            "open_items": open_items,
+            "evidence": readiness["evidence"],
+        }
+    if name == "reserve_budget":
+        role = args.get("role", "")
+        principal = _principal_for_role(role)
+        amount = args.get("amount")
+        if not isinstance(amount, int) or isinstance(amount, bool) or amount <= 0:
+            raise GuardianError("INVALID_REQUEST", "amount must be a positive integer.", 400)
+        category = str(args.get("category", "event-reservation"))
+        action = store.create_action(
+            principal,
+            "reserve_budget",
+            {"amount": amount, "category": category},
+            required=False,
+        )
+        claim = store.claim_action(principal, action["id"], 1)
+        return {"action": action, "reservation_claim": claim}
+    if name == "record_observation":
+        role = args.get("role", "")
+        principal = _principal_for_role(role)
+        kind = args.get("kind")
+        data = args.get("data")
+        if not isinstance(kind, str) or not isinstance(data, dict):
+            raise GuardianError("INVALID_REQUEST", "kind and data are required.", 400)
+        return store.record_agent_claim(principal, "observation", {"kind": kind, "data": data})
+    if name == "get_goals":
+        role = args.get("role", "")
+        _principal_for_role(role)
+        state = store.state()
+        return {
+            "workspace_name": state["workspace_name"],
+            "facts": [
+                fact for fact in state["facts"]
+                if not (role == "invitations" and fact["id"] == "sponsor.amount")
+            ],
+            "review_dispositions": state["review_dispositions"],
+        }
+    if name == "request_review":
+        role = args.get("role", "")
+        _principal_for_role(role)
+        return store.evaluate_review()
+    if name == "list_findings":
+        role = args.get("role", "")
+        _principal_for_role(role)
+        return store.evaluate_review()
+    if name == "record_progress":
+        role = args.get("role", "")
+        principal = _principal_for_role(role)
+        task_id = args.get("task_id")
+        observation = args.get("observation")
+        if not isinstance(task_id, str) or not isinstance(observation, str):
+            raise GuardianError("INVALID_REQUEST", "task_id and observation are required.", 400)
+        return store.record_agent_claim(
+            principal,
+            "progress",
+            {
+                "task_id": task_id,
+                "revision_id": args.get("revision_id"),
+                "observation": observation,
+            },
+        )
+    if name == "recommend_priorities":
+        role = args.get("role", "")
+        _principal_for_role(role)
+        readiness = store.readiness()
+        review = store.evaluate_review()
+        return {
+            "recommendation": [
+                {"priority": "required", "items": [
+                    obligation["name"] for obligation in readiness["open_obligations"]
+                ]},
+                {"priority": "required", "items": [
+                    action["reason"] or action["type"]
+                    for action in readiness["pending_required_actions"]
+                ]},
+            ],
+            "findings": review["findings"],
+            "authority": "advisory",
+        }
     raise GuardianError("UNKNOWN_TOOL", f"Unknown MCP tool: {name}", 404)
 
 

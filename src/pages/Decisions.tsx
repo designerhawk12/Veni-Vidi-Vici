@@ -1,9 +1,25 @@
+import { useEffect, useState } from 'react'
 import { Check, ShieldCheck } from 'lucide-react'
 import type { ReturnTypeUseDemoScenario } from './pageTypes'
 import ApprovalCard from '../components/dashboard/ApprovalCard'
 import ReviewerCard from '../components/dashboard/ReviewerCard'
 
 export default function Decisions({ scenario }: { scenario: ReturnTypeUseDemoScenario }) {
+  const [priorityItems, setPriorityItems] = useState<string[]>([])
+  useEffect(() => {
+    if (!scenario.apiMode) {
+      setPriorityItems([])
+      return
+    }
+    let active = true
+    void scenario.priorities('catering').then((result) => {
+      if (!active || !result) return
+      setPriorityItems(result.recommendation.flatMap((item) => item.items).filter((item, index, items) => items.indexOf(item) === index))
+    }).catch(() => {
+      if (active) setPriorityItems([])
+    })
+    return () => { active = false }
+  }, [scenario.apiMode])
   const invitation =
     scenario.actions.find((action) => action.id === 'invitation-current') ??
     scenario.actions.find((action) => action.status !== 'stale') ??
@@ -12,6 +28,15 @@ export default function Decisions({ scenario }: { scenario: ReturnTypeUseDemoSce
   return <div className="page-content subpage-content">
     <div className="page-heading-row"><div><div className="page-eyebrow"><span className="page-eyebrow-line" /> ORGANIZER DECISIONS</div><h1>Decisions</h1><p>Review exact action proposals and independent advice. Neither can silently change the owner’s goals.</p></div><span className="subpage-count"><ShieldCheck size={14} />Organizer-controlled</span></div>
     <div className="callout-strip"><span className="callout-icon"><Check size={16} /></span><div><strong>Two independent decision paths</strong><span>Action approval is bound to the displayed proposal and fact versions. Budget advice is non-authorizing and requires an explicit organizer response.</span></div></div>
+    {scenario.apiMode && priorityItems.length > 0 && (
+      <div className="callout-strip">
+        <span className="callout-icon"><ShieldCheck size={16} /></span>
+        <div>
+          <strong>Advisory priority guidance</strong>
+          <span>{priorityItems.join(' · ')}</span>
+        </div>
+      </div>
+    )}
     <div className="decision-panels">
       {invitation
         ? <ApprovalCard action={invitation} facts={scenario.facts} decision={scenario.decision} providerAccepted={scenario.providerAccepted} pauseAutomationOn={scenario.pauseAutomationOn} apiMode={scenario.apiMode} apiBusy={scenario.apiBusy} claimRecorded={scenario.claimRecorded} onApprove={scenario.approveInvitation} onReject={scenario.rejectInvitation} onSend={scenario.simulateGuardedSend} />
@@ -26,7 +51,7 @@ export default function Decisions({ scenario }: { scenario: ReturnTypeUseDemoSce
               Propose invitation batch ({scenario.facts.venue} · V{scenario.facts.version})
             </button>
           </section>}
-      <ReviewerCard onDisposition={scenario.recordReviewDisposition} apiMode={scenario.apiMode} facts={scenario.facts} openObligations={scenario.openObligations} persistedDispositions={scenario.reviewDispositions} />
+      <ReviewerCard onDisposition={scenario.recordReviewDisposition} apiMode={scenario.apiMode} facts={scenario.facts} openObligations={scenario.openObligations} persistedDispositions={scenario.reviewDispositions} reviewData={scenario.reviewData} />
     </div>
   </div>
 }
